@@ -1,0 +1,861 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/tree.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/tree.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::os { hash_seed }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> std::hashmap { <span class="ty">HashMap</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> std::builtin::par { <span class="ty">Ref</span>, ref_get, ref_new, ref_set }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;signal.taut&quot;</span> {
+<a class="ln" id="L5" href="#L5">5</a>  <span class="ty">Signal</span>,
+<a class="ln" id="L6" href="#L6">6</a>  batch,
+<a class="ln" id="L7" href="#L7">7</a>  dispose,
+<a class="ln" id="L8" href="#L8">8</a>  get,
+<a class="ln" id="L9" href="#L9">9</a>  hold,
+<a class="ln" id="L10" href="#L10">10</a>  in_owner,
+<a class="ln" id="L11" href="#L11">11</a>  memo,
+<a class="ln" id="L12" href="#L12">12</a>  memo_eq,
+<a class="ln" id="L13" href="#L13">13</a>  on_cleanup,
+<a class="ln" id="L14" href="#L14">14</a>  own,
+<a class="ln" id="L15" href="#L15">15</a>  peek,
+<a class="ln" id="L16" href="#L16">16</a>  release,
+<a class="ln" id="L17" href="#L17">17</a>  rt,
+<a class="ln" id="L18" href="#L18">18</a>  run_held,
+<a class="ln" id="L19" href="#L19">19</a>  scope,
+<a class="ln" id="L20" href="#L20">20</a>  untracked,
+<a class="ln" id="L21" href="#L21">21</a>  watch
+<a class="ln" id="L22" href="#L22">22</a>}
+<a class="ln" id="L23" href="#L23">23</a>
+<a class="ln" id="L24" href="#L24">24</a><span class="com">// The element layer: elements, their properties and events, and the nodes whose shape</span>
+<a class="ln" id="L25" href="#L25">25</a><span class="com">// changes (`show`, `switch_on`, `keyed_each`). It does not draw. It keeps a retained tree of</span>
+<a class="ln" id="L26" href="#L26">26</a><span class="com">// numbered nodes and appends each change to a list of patches, which a renderer (the DOM,</span>
+<a class="ln" id="L27" href="#L27">27</a><span class="com">// a native toolkit, or the headless one in this file) applies. `K` is the type of element</span>
+<a class="ln" id="L28" href="#L28">28</a><span class="com">// kinds and `P` the type of properties of that renderer.</span>
+<a class="ln" id="L29" href="#L29">29</a>
+<a class="ln" id="L30" href="#L30">30</a><span class="com">// A node of the retained tree. Only `Tree` hands out numbers, and a number is not reused.</span>
+<a class="ln" id="L31" href="#L31">31</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Node</span> { id: u32 }
+<a class="ln" id="L32" href="#L32">32</a>
+<a class="ln" id="L33" href="#L33">33</a><span class="com">// The kind of an event a handler is registered for.</span>
+<a class="ln" id="L34" href="#L34">34</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">EventKind</span> {
+<a class="ln" id="L35" href="#L35">35</a>  <span class="ty">Press</span>
+<a class="ln" id="L36" href="#L36">36</a>  <span class="ty">Focus</span>
+<a class="ln" id="L37" href="#L37">37</a>  <span class="ty">Blur</span>
+<a class="ln" id="L38" href="#L38">38</a>  <span class="ty">Key</span>
+<a class="ln" id="L39" href="#L39">39</a>  <span class="com">// The text of an input field was committed.</span>
+<a class="ln" id="L40" href="#L40">40</a>  <span class="ty">Edit</span>
+<a class="ln" id="L41" href="#L41">41</a>  <span class="ty">PointerEnter</span>
+<a class="ln" id="L42" href="#L42">42</a>  <span class="ty">PointerLeave</span>
+<a class="ln" id="L43" href="#L43">43</a>  <span class="ty">PointerDown</span>
+<a class="ln" id="L44" href="#L44">44</a>  <span class="ty">PointerMove</span>
+<a class="ln" id="L45" href="#L45">45</a>  <span class="ty">PointerUp</span>
+<a class="ln" id="L46" href="#L46">46</a>  <span class="ty">Scroll</span>
+<a class="ln" id="L47" href="#L47">47</a>  <span class="com">// A form was submitted; the page does not navigate.</span>
+<a class="ln" id="L48" href="#L48">48</a>  <span class="ty">Submit</span>
+<a class="ln" id="L49" href="#L49">49</a>  <span class="com">// A named action, such as one an assistive technology asks for.</span>
+<a class="ln" id="L50" href="#L50">50</a>  <span class="ty">NamedAction</span>(<span class="ty">Text</span>)
+<a class="ln" id="L51" href="#L51">51</a>  <span class="com">// A drag of an element the renderer was told is a drag source: it has moved far enough to</span>
+<a class="ln" id="L52" href="#L52">52</a>  <span class="com">// be a drag (`DragStart`, with where it started), it moves (`DragMove`), and it ends</span>
+<a class="ln" id="L53" href="#L53">53</a>  <span class="com">// (`DragEnd`), each delivered to the source with the pointer's position. Where it was let</span>
+<a class="ln" id="L54" href="#L54">54</a>  <span class="com">// go, the node under the pointer gets `Drop` first.</span>
+<a class="ln" id="L55" href="#L55">55</a>  <span class="ty">DragStart</span>
+<a class="ln" id="L56" href="#L56">56</a>  <span class="ty">DragMove</span>
+<a class="ln" id="L57" href="#L57">57</a>  <span class="ty">DragEnd</span>
+<a class="ln" id="L58" href="#L58">58</a>  <span class="ty">Drop</span>
+<a class="ln" id="L59" href="#L59">59</a>  <span class="com">// A key was let go, with the key it names.</span>
+<a class="ln" id="L60" href="#L60">60</a>  <span class="ty">KeyUp</span>
+<a class="ln" id="L61" href="#L61">61</a>  <span class="com">// Two presses in quick succession.</span>
+<a class="ln" id="L62" href="#L62">62</a>  <span class="ty">DoubleClick</span>
+<a class="ln" id="L63" href="#L63">63</a>  <span class="com">// The context menu was asked for, as by a right press; the browser's own menu still opens.</span>
+<a class="ln" id="L64" href="#L64">64</a>  <span class="ty">ContextMenu</span>
+<a class="ln" id="L65" href="#L65">65</a>  <span class="com">// The wheel turned, with how far across and down (`ScrollData`).</span>
+<a class="ln" id="L66" href="#L66">66</a>  <span class="ty">Wheel</span>
+<a class="ln" id="L67" href="#L67">67</a>  <span class="com">// Text was pasted, with the plain text pasted (`TextData`).</span>
+<a class="ln" id="L68" href="#L68">68</a>  <span class="ty">Paste</span>
+<a class="ln" id="L69" href="#L69">69</a>}
+<a class="ln" id="L70" href="#L70">70</a>
+<a class="ln" id="L71" href="#L71">71</a><span class="com">// What came with an event: the key, the committed text, the pointer's position and button,</span>
+<a class="ln" id="L72" href="#L72">72</a><span class="com">// or the scroll amount.</span>
+<a class="ln" id="L73" href="#L73">73</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">EventData</span> {
+<a class="ln" id="L74" href="#L74">74</a>  <span class="ty">NoData</span>
+<a class="ln" id="L75" href="#L75">75</a>  <span class="ty">KeyData</span>(<span class="ty">Text</span>)
+<a class="ln" id="L76" href="#L76">76</a>  <span class="ty">TextData</span>(<span class="ty">Text</span>)
+<a class="ln" id="L77" href="#L77">77</a>  <span class="ty">Pointer</span>(i64, i64, i64)
+<a class="ln" id="L78" href="#L78">78</a>  <span class="ty">ScrollData</span>(i64, i64)
+<a class="ln" id="L79" href="#L79">79</a>}
+<a class="ln" id="L80" href="#L80">80</a>
+<a class="ln" id="L81" href="#L81">81</a><span class="com">// The text an event committed (`TextData`), or the key it names (`KeyData`); else &quot;&quot;.</span>
+<a class="ln" id="L82" href="#L82">82</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">event_text</span>(<span class="var">d</span>: <a href="#L73"><span class="ty">EventData</span></a>): <span class="ty">Text</span> {
+<a class="ln" id="L83" href="#L83">83</a>  <span class="kw">match</span> d {
+<a class="ln" id="L84" href="#L84">84</a>    <span class="ty">TextData</span>(s) =&gt; s,
+<a class="ln" id="L85" href="#L85">85</a>    <span class="ty">KeyData</span>(s) =&gt; s,
+<a class="ln" id="L86" href="#L86">86</a>    <span class="ty">NoData</span> =&gt; <span class="str">&quot;&quot;</span>,
+<a class="ln" id="L87" href="#L87">87</a>    <span class="ty">Pointer</span>(_, _, _) =&gt; <span class="str">&quot;&quot;</span>,
+<a class="ln" id="L88" href="#L88">88</a>    <span class="ty">ScrollData</span>(_, _) =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L89" href="#L89">89</a>  }
+<a class="ln" id="L90" href="#L90">90</a>}
+<a class="ln" id="L91" href="#L91">91</a>
+<a class="ln" id="L92" href="#L92">92</a><span class="com">// A property of an element: fixed, following the signals its function reads, or a handler.</span>
+<a class="ln" id="L93" href="#L93">93</a><span class="com">// A handler only reads and writes signals; work that waits goes through a store's jobs.</span>
+<a class="ln" id="L94" href="#L94">94</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">Prop</span>(<span class="ty">P</span>: <span class="ty">Type</span>) {
+<a class="ln" id="L95" href="#L95">95</a>  <span class="ty">Static</span>(<span class="ty">P</span>)
+<a class="ln" id="L96" href="#L96">96</a>  <span class="ty">Dyn</span>(() -&gt; <span class="ty">P</span> ! {rt, div})
+<a class="ln" id="L97" href="#L97">97</a>  <span class="ty">On</span>(<a href="#L34"><span class="ty">EventKind</span></a>, (<span class="var">d</span>: <a href="#L73"><span class="ty">EventData</span></a>) -&gt; <span class="ty">Unit</span> ! {rt, div})
+<a class="ln" id="L98" href="#L98">98</a>  <span class="com">// A handler the signal runtime keeps, by the id `hold` gave; it reads the event's data</span>
+<a class="ln" id="L99" href="#L99">99</a>  <span class="com">// with `current_event`. The node takes it over: it is released when the node's owner ends.</span>
+<a class="ln" id="L100" href="#L100">100</a>  <span class="ty">Held</span>(<a href="#L34"><span class="ty">EventKind</span></a>, u64)
+<a class="ln" id="L101" href="#L101">101</a>}
+<a class="ln" id="L102" href="#L102">102</a>
+<a class="ln" id="L103" href="#L103">103</a><span class="com">// The changes to the retained tree, in the order a renderer applies them.</span>
+<a class="ln" id="L104" href="#L104">104</a><span class="com">//</span>
+<a class="ln" id="L105" href="#L105">105</a><span class="com">// - A node is created detached, by `Create`, `CreateText` or `CreateGroup`, and numbered once.</span>
+<a class="ln" id="L106" href="#L106">106</a><span class="com">// - `Append` and `InsertBefore` on a node that already has a parent move it.</span>
+<a class="ln" id="L107" href="#L107">107</a><span class="com">// - `Remove` detaches a node with all of its subtree, and every node in it is dead: no patch</span>
+<a class="ln" id="L108" href="#L108">108</a><span class="com">//   names it again. Only the root of what was removed gets a `Remove`, not its descendants.</span>
+<a class="ln" id="L109" href="#L109">109</a><span class="com">// - A group has no box of its own; its children stand in its place in its parent.</span>
+<a class="ln" id="L110" href="#L110">110</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">Patch</span>(<span class="ty">K</span>: <span class="ty">Type</span>, <span class="ty">P</span>: <span class="ty">Type</span>) {
+<a class="ln" id="L111" href="#L111">111</a>  <span class="ty">Create</span>(<a href="#L31"><span class="ty">Node</span></a>, <span class="ty">K</span>)
+<a class="ln" id="L112" href="#L112">112</a>  <span class="ty">CreateText</span>(<a href="#L31"><span class="ty">Node</span></a>, <span class="ty">Text</span>)
+<a class="ln" id="L113" href="#L113">113</a>  <span class="com">// A node with no box of its own, standing for the nodes `show`, `switch_on` and `keyed_each`</span>
+<a class="ln" id="L114" href="#L114">114</a>  <span class="com">// put in it.</span>
+<a class="ln" id="L115" href="#L115">115</a>  <span class="ty">CreateGroup</span>(<a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L116" href="#L116">116</a>  <span class="ty">SetProp</span>(<a href="#L31"><span class="ty">Node</span></a>, <span class="ty">P</span>)
+<a class="ln" id="L117" href="#L117">117</a>  <span class="ty">SetText</span>(<a href="#L31"><span class="ty">Node</span></a>, <span class="ty">Text</span>)
+<a class="ln" id="L118" href="#L118">118</a>  <span class="com">// Puts `child` last among the children of `parent`.</span>
+<a class="ln" id="L119" href="#L119">119</a>  <span class="ty">Append</span>(<a href="#L31"><span class="ty">Node</span></a>, <a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L120" href="#L120">120</a>  <span class="com">// Puts `child` right before `before`, a child of `parent`.</span>
+<a class="ln" id="L121" href="#L121">121</a>  <span class="ty">InsertBefore</span>(<a href="#L31"><span class="ty">Node</span></a>, <a href="#L31"><span class="ty">Node</span></a>, <a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L122" href="#L122">122</a>  <span class="ty">Remove</span>(<a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L123" href="#L123">123</a>  <span class="com">// The subtree under the node, made by `template`, has the shape every other instance of</span>
+<a class="ln" id="L124" href="#L124">124</a>  <span class="com">// the template has: a renderer may build the first one and copy it for the others.</span>
+<a class="ln" id="L125" href="#L125">125</a>  <span class="ty">Template</span>(u64, <a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L126" href="#L126">126</a>}
+<a class="ln" id="L127" href="#L127">127</a>
+<a class="ln" id="L128" href="#L128">128</a><span class="com">// A handler of the tree: its function is kept by the signal runtime under `held`, and reads</span>
+<a class="ln" id="L129" href="#L129">129</a><span class="com">// the event's data from the tree's `event`, so that the tree holds no function.</span>
+<a class="ln" id="L130" href="#L130">130</a><span class="kw">struct</span> <span class="ty">Handler</span> { node: u32, kind: <a href="#L34"><span class="ty">EventKind</span></a>, held: u64 }
+<a class="ln" id="L131" href="#L131">131</a>
+<a class="ln" id="L132" href="#L132">132</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Tree</span>(<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>) {
+<a class="ln" id="L133" href="#L133">133</a>  next: <span class="ty">Ref</span>(u32),
+<a class="ln" id="L134" href="#L134">134</a>  patches: <span class="ty">Ref</span>(<span class="ty">List</span>(<a href="#L110"><span class="ty">Patch</span></a>(<span class="ty">K</span>, <span class="ty">P</span>))),
+<a class="ln" id="L135" href="#L135">135</a>  handlers: <span class="ty">Ref</span>(<span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>)),
+<a class="ln" id="L136" href="#L136">136</a>  <span class="com">// The data of the event being delivered.</span>
+<a class="ln" id="L137" href="#L137">137</a>  event: <span class="ty">Ref</span>(<a href="#L73"><span class="ty">EventData</span></a>),
+<a class="ln" id="L138" href="#L138">138</a>  <span class="com">// The resources still loading under each suspense boundary being built, innermost first.</span>
+<a class="ln" id="L139" href="#L139">139</a>  boundaries: <span class="ty">Ref</span>(<span class="ty">List</span>(<span class="ty">delim::src::signal::Signal</span>(u64))),
+<a class="ln" id="L140" href="#L140">140</a>  duplicate_keys: <span class="ty">Ref</span>(<span class="ty">List</span>(u64))
+<a class="ln" id="L141" href="#L141">141</a>}
+<a class="ln" id="L142" href="#L142">142</a>
+<a class="ln" id="L143" href="#L143">143</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tree</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(): <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>) ! {ref_new} {
+<a class="ln" id="L144" href="#L144">144</a>  <span class="ty">Tree</span> {
+<a class="ln" id="L145" href="#L145">145</a>    next: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="num">1</span>),
+<a class="ln" id="L146" href="#L146">146</a>    patches: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L147" href="#L147">147</a>    handlers: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L148" href="#L148">148</a>    event: <span class="kw">perform</span> <span class="fn">ref_new</span>(<a href="#L74"><span class="ty">NoData</span></a>),
+<a class="ln" id="L149" href="#L149">149</a>    boundaries: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L150" href="#L150">150</a>    duplicate_keys: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>)
+<a class="ln" id="L151" href="#L151">151</a>  }
+<a class="ln" id="L152" href="#L152">152</a>}
+<a class="ln" id="L153" href="#L153">153</a>
+<a class="ln" id="L154" href="#L154">154</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">node_of</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L155" href="#L155">155</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)
+<a class="ln" id="L156" href="#L156">156</a>): <a href="#L31"><span class="ty">Node</span></a> ! {overflow, ref_get, ref_set} {
+<a class="ln" id="L157" href="#L157">157</a>  <span class="kw">let</span> n := <span class="kw">perform</span> <span class="fn">ref_get</span>(t.next)
+<a class="ln" id="L158" href="#L158">158</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(t.next, n + <span class="num">1</span>)
+<a class="ln" id="L159" href="#L159">159</a>  <span class="ty">Node</span> { id: n }
+<a class="ln" id="L160" href="#L160">160</a>}
+<a class="ln" id="L161" href="#L161">161</a>
+<a class="ln" id="L162" href="#L162">162</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">emit</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L163" href="#L163">163</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L164" href="#L164">164</a>  <span class="var">p</span>: <a href="#L110"><span class="ty">Patch</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)
+<a class="ln" id="L165" href="#L165">165</a>): <span class="ty">Unit</span> ! {ref_get, ref_set} {
+<a class="ln" id="L166" href="#L166">166</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(t.patches, <span class="ty">Cons</span>(p, <span class="kw">perform</span> <span class="fn">ref_get</span>(t.patches)))
+<a class="ln" id="L167" href="#L167">167</a>}
+<a class="ln" id="L168" href="#L168">168</a>
+<a class="ln" id="L169" href="#L169">169</a><span class="kw">fn</span> <span class="fn">reverse_patches</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L170" href="#L170">170</a>  <span class="var">l</span>: <span class="ty">List</span>(<a href="#L110"><span class="ty">Patch</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)),
+<a class="ln" id="L171" href="#L171">171</a>  <span class="var">acc</span>: <span class="ty">List</span>(<a href="#L110"><span class="ty">Patch</span></a>(<span class="ty">K</span>, <span class="ty">P</span>))
+<a class="ln" id="L172" href="#L172">172</a>): <span class="ty">List</span>(<a href="#L110"><span class="ty">Patch</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)) {
+<a class="ln" id="L173" href="#L173">173</a>  <span class="kw">match</span> l {
+<a class="ln" id="L174" href="#L174">174</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L175" href="#L175">175</a>    <span class="ty">Cons</span>(p, rest) =&gt; <a href="#L169"><span class="fn">reverse_patches</span></a>(rest, <span class="ty">Cons</span>(p, acc))
+<a class="ln" id="L176" href="#L176">176</a>  }
+<a class="ln" id="L177" href="#L177">177</a>}
+<a class="ln" id="L178" href="#L178">178</a>
+<a class="ln" id="L179" href="#L179">179</a><span class="com">// The patches since the last call, oldest first.</span>
+<a class="ln" id="L180" href="#L180">180</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">take_patches</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L181" href="#L181">181</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)
+<a class="ln" id="L182" href="#L182">182</a>): <span class="ty">List</span>(<a href="#L110"><span class="ty">Patch</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)) ! {ref_get, ref_set} {
+<a class="ln" id="L183" href="#L183">183</a>  <span class="kw">let</span> ps := <span class="kw">perform</span> <span class="fn">ref_get</span>(t.patches)
+<a class="ln" id="L184" href="#L184">184</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(t.patches, <span class="ty">Nil</span>)
+<a class="ln" id="L185" href="#L185">185</a>  <a href="#L169"><span class="fn">reverse_patches</span></a>(ps, <span class="ty">Nil</span>)
+<a class="ln" id="L186" href="#L186">186</a>}
+<a class="ln" id="L187" href="#L187">187</a>
+<a class="ln" id="L188" href="#L188">188</a><span class="kw">fn</span> <span class="fn">kind_code</span>(<span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>): u64 {
+<a class="ln" id="L189" href="#L189">189</a>  <span class="kw">match</span> k {
+<a class="ln" id="L190" href="#L190">190</a>    <span class="ty">Press</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L191" href="#L191">191</a>    <span class="ty">Focus</span> =&gt; <span class="num">1</span>
+<a class="ln" id="L192" href="#L192">192</a>    <span class="ty">Blur</span> =&gt; <span class="num">2</span>
+<a class="ln" id="L193" href="#L193">193</a>    <span class="ty">Key</span> =&gt; <span class="num">3</span>
+<a class="ln" id="L194" href="#L194">194</a>    <span class="ty">Edit</span> =&gt; <span class="num">4</span>
+<a class="ln" id="L195" href="#L195">195</a>    <span class="ty">PointerEnter</span> =&gt; <span class="num">5</span>
+<a class="ln" id="L196" href="#L196">196</a>    <span class="ty">PointerLeave</span> =&gt; <span class="num">6</span>
+<a class="ln" id="L197" href="#L197">197</a>    <span class="ty">PointerDown</span> =&gt; <span class="num">7</span>
+<a class="ln" id="L198" href="#L198">198</a>    <span class="ty">PointerMove</span> =&gt; <span class="num">8</span>
+<a class="ln" id="L199" href="#L199">199</a>    <span class="ty">PointerUp</span> =&gt; <span class="num">9</span>
+<a class="ln" id="L200" href="#L200">200</a>    <span class="ty">Scroll</span> =&gt; <span class="num">10</span>
+<a class="ln" id="L201" href="#L201">201</a>    <span class="ty">NamedAction</span>(x) =&gt; <span class="num">11</span>
+<a class="ln" id="L202" href="#L202">202</a>    <span class="ty">Submit</span> =&gt; <span class="num">12</span>
+<a class="ln" id="L203" href="#L203">203</a>    <span class="ty">DragStart</span> =&gt; <span class="num">13</span>
+<a class="ln" id="L204" href="#L204">204</a>    <span class="ty">DragMove</span> =&gt; <span class="num">14</span>
+<a class="ln" id="L205" href="#L205">205</a>    <span class="ty">DragEnd</span> =&gt; <span class="num">15</span>
+<a class="ln" id="L206" href="#L206">206</a>    <span class="ty">Drop</span> =&gt; <span class="num">16</span>
+<a class="ln" id="L207" href="#L207">207</a>    <span class="ty">KeyUp</span> =&gt; <span class="num">17</span>
+<a class="ln" id="L208" href="#L208">208</a>    <span class="ty">DoubleClick</span> =&gt; <span class="num">18</span>
+<a class="ln" id="L209" href="#L209">209</a>    <span class="ty">ContextMenu</span> =&gt; <span class="num">19</span>
+<a class="ln" id="L210" href="#L210">210</a>    <span class="ty">Wheel</span> =&gt; <span class="num">20</span>
+<a class="ln" id="L211" href="#L211">211</a>    <span class="ty">Paste</span> =&gt; <span class="num">21</span>
+<a class="ln" id="L212" href="#L212">212</a>  }
+<a class="ln" id="L213" href="#L213">213</a>}
+<a class="ln" id="L214" href="#L214">214</a>
+<a class="ln" id="L215" href="#L215">215</a><span class="kw">fn</span> <span class="fn">action_name</span>(<span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>): <span class="ty">Text</span> {
+<a class="ln" id="L216" href="#L216">216</a>  <span class="kw">match</span> k {
+<a class="ln" id="L217" href="#L217">217</a>    <span class="ty">Press</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L218" href="#L218">218</a>    <span class="ty">Focus</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L219" href="#L219">219</a>    <span class="ty">Blur</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L220" href="#L220">220</a>    <span class="ty">Key</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L221" href="#L221">221</a>    <span class="ty">Edit</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L222" href="#L222">222</a>    <span class="ty">PointerEnter</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L223" href="#L223">223</a>    <span class="ty">PointerLeave</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L224" href="#L224">224</a>    <span class="ty">PointerDown</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L225" href="#L225">225</a>    <span class="ty">PointerMove</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L226" href="#L226">226</a>    <span class="ty">PointerUp</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L227" href="#L227">227</a>    <span class="ty">Scroll</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L228" href="#L228">228</a>    <span class="ty">Submit</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L229" href="#L229">229</a>    <span class="ty">DragStart</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L230" href="#L230">230</a>    <span class="ty">DragMove</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L231" href="#L231">231</a>    <span class="ty">DragEnd</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L232" href="#L232">232</a>    <span class="ty">Drop</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L233" href="#L233">233</a>    <span class="ty">KeyUp</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L234" href="#L234">234</a>    <span class="ty">DoubleClick</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L235" href="#L235">235</a>    <span class="ty">ContextMenu</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L236" href="#L236">236</a>    <span class="ty">Wheel</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L237" href="#L237">237</a>    <span class="ty">Paste</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L238" href="#L238">238</a>    <span class="ty">NamedAction</span>(x) =&gt; x
+<a class="ln" id="L239" href="#L239">239</a>  }
+<a class="ln" id="L240" href="#L240">240</a>}
+<a class="ln" id="L241" href="#L241">241</a>
+<a class="ln" id="L242" href="#L242">242</a><span class="kw">fn</span> <span class="fn">same_kind</span>(<span class="var">a</span>: <a href="#L34"><span class="ty">EventKind</span></a>, <span class="var">b</span>: <a href="#L34"><span class="ty">EventKind</span></a>): <span class="ty">Bool</span> ! {div} {
+<a class="ln" id="L243" href="#L243">243</a>  <a href="#L188"><span class="fn">kind_code</span></a>(a) == <a href="#L188"><span class="fn">kind_code</span></a>(b) &amp;&amp; <a href="#L215"><span class="fn">action_name</span></a>(a) == <a href="#L215"><span class="fn">action_name</span></a>(b)
+<a class="ln" id="L244" href="#L244">244</a>}
+<a class="ln" id="L245" href="#L245">245</a>
+<a class="ln" id="L246" href="#L246">246</a><span class="kw">fn</span> <span class="fn">run_handlers</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>), <span class="var">n</span>: u32, <span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L247" href="#L247">247</a>  <span class="kw">match</span> l {
+<a class="ln" id="L248" href="#L248">248</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L249" href="#L249">249</a>    <span class="ty">Cons</span>(h, rest) =&gt; {
+<a class="ln" id="L250" href="#L250">250</a>      <span class="kw">if</span> h.node == n &amp;&amp; <a href="#L242"><span class="fn">same_kind</span></a>(h.kind, k) { <a href="../src/signal.taut.html#L328"><span class="fn">run_held</span></a>(h.held) } <span class="kw">else</span> { #() }
+<a class="ln" id="L251" href="#L251">251</a>      <a href="#L246"><span class="fn">run_handlers</span></a>(rest, n, k)
+<a class="ln" id="L252" href="#L252">252</a>    }
+<a class="ln" id="L253" href="#L253">253</a>  }
+<a class="ln" id="L254" href="#L254">254</a>}
+<a class="ln" id="L255" href="#L255">255</a>
+<a class="ln" id="L256" href="#L256">256</a><span class="com">// Delivers an event to the handlers of the node, oldest first, as one batch: the watchers</span>
+<a class="ln" id="L257" href="#L257">257</a><span class="com">// the handlers make stale run once, after the last handler.</span>
+<a class="ln" id="L258" href="#L258">258</a><span class="com">// The data of the event the tree is delivering now.</span>
+<a class="ln" id="L259" href="#L259">259</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">current_event</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L260" href="#L260">260</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)
+<a class="ln" id="L261" href="#L261">261</a>): <a href="#L73"><span class="ty">EventData</span></a> ! {ref_get} {
+<a class="ln" id="L262" href="#L262">262</a>  <span class="kw">perform</span> <span class="fn">ref_get</span>(t.event)
+<a class="ln" id="L263" href="#L263">263</a>}
+<a class="ln" id="L264" href="#L264">264</a>
+<a class="ln" id="L265" href="#L265">265</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">fire</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L266" href="#L266">266</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L267" href="#L267">267</a>  <span class="var">n</span>: <a href="#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L268" href="#L268">268</a>  <span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>,
+<a class="ln" id="L269" href="#L269">269</a>  <span class="var">d</span>: <a href="#L73"><span class="ty">EventData</span></a>
+<a class="ln" id="L270" href="#L270">270</a>): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L271" href="#L271">271</a>  <span class="kw">let</span> hs := <a href="#L301"><span class="fn">reverse_handlers</span></a>(<span class="kw">perform</span> <span class="fn">ref_get</span>(t.handlers), <span class="ty">Nil</span>)
+<a class="ln" id="L272" href="#L272">272</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(t.event, d)
+<a class="ln" id="L273" href="#L273">273</a>  <a href="../src/signal.taut.html#L571"><span class="fn">batch</span></a>(() =&gt; <a href="#L246"><span class="fn">run_handlers</span></a>(hs, n.id, k))
+<a class="ln" id="L274" href="#L274">274</a>}
+<a class="ln" id="L275" href="#L275">275</a>
+<a class="ln" id="L276" href="#L276">276</a><span class="com">// Whether an event of the kind goes from the node it happened on up to the nearest node that</span>
+<a class="ln" id="L277" href="#L277">277</a><span class="com">// has a handler for it, as the DOM's events bubble: a press, a key, an edit, a submit, a</span>
+<a class="ln" id="L278" href="#L278">278</a><span class="com">// pointer going down, moving or up, a named action, a drop, a key let go, a double press, a</span>
+<a class="ln" id="L279" href="#L279">279</a><span class="com">// context menu, a wheel turn and a paste. A renderer that knows the</span>
+<a class="ln" id="L280" href="#L280">280</a><span class="com">// parents of its nodes finds that node with `handler_nodes`; other events go to the node.</span>
+<a class="ln" id="L281" href="#L281">281</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">bubbles</span>(<span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>): <span class="ty">Bool</span> ! {div} {
+<a class="ln" id="L282" href="#L282">282</a>  <span class="kw">let</span> c := <a href="#L188"><span class="fn">kind_code</span></a>(k)
+<a class="ln" id="L283" href="#L283">283</a>  c == <span class="num">0</span> || c == <span class="num">3</span> || c == <span class="num">4</span> || c == <span class="num">7</span> || c == <span class="num">8</span> || c == <span class="num">9</span> || c == <span class="num">11</span> || c == <span class="num">12</span> || c &gt;= <span class="num">16</span>
+<a class="ln" id="L284" href="#L284">284</a>}
+<a class="ln" id="L285" href="#L285">285</a>
+<a class="ln" id="L286" href="#L286">286</a><span class="com">// The nodes that have a handler for events of the kind.</span>
+<a class="ln" id="L287" href="#L287">287</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">handler_nodes</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L288" href="#L288">288</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L289" href="#L289">289</a>  <span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>
+<a class="ln" id="L290" href="#L290">290</a>): <span class="ty">List</span>(u32) ! {div, ref_get} {
+<a class="ln" id="L291" href="#L291">291</a>  <a href="#L294"><span class="fn">nodes_for</span></a>(<span class="kw">perform</span> <span class="fn">ref_get</span>(t.handlers), k, <span class="ty">Nil</span>)
+<a class="ln" id="L292" href="#L292">292</a>}
+<a class="ln" id="L293" href="#L293">293</a>
+<a class="ln" id="L294" href="#L294">294</a><span class="kw">fn</span> <span class="fn">nodes_for</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>), <span class="var">k</span>: <a href="#L34"><span class="ty">EventKind</span></a>, <span class="var">acc</span>: <span class="ty">List</span>(u32)): <span class="ty">List</span>(u32) ! {div} {
+<a class="ln" id="L295" href="#L295">295</a>  <span class="kw">match</span> l {
+<a class="ln" id="L296" href="#L296">296</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L297" href="#L297">297</a>    <span class="ty">Cons</span>(h, rest) =&gt; <a href="#L294"><span class="fn">nodes_for</span></a>(rest, k, <span class="kw">if</span> <a href="#L242"><span class="fn">same_kind</span></a>(h.kind, k) { <span class="ty">Cons</span>(h.node, acc) } <span class="kw">else</span> { acc })
+<a class="ln" id="L298" href="#L298">298</a>  }
+<a class="ln" id="L299" href="#L299">299</a>}
+<a class="ln" id="L300" href="#L300">300</a>
+<a class="ln" id="L301" href="#L301">301</a><span class="kw">fn</span> <span class="fn">reverse_handlers</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>), <span class="var">acc</span>: <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>)): <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>) {
+<a class="ln" id="L302" href="#L302">302</a>  <span class="kw">match</span> l {
+<a class="ln" id="L303" href="#L303">303</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L304" href="#L304">304</a>    <span class="ty">Cons</span>(h, rest) =&gt; <a href="#L301"><span class="fn">reverse_handlers</span></a>(rest, <span class="ty">Cons</span>(h, acc))
+<a class="ln" id="L305" href="#L305">305</a>  }
+<a class="ln" id="L306" href="#L306">306</a>}
+<a class="ln" id="L307" href="#L307">307</a>
+<a class="ln" id="L308" href="#L308">308</a><span class="kw">fn</span> <span class="fn">drop_handler</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>), <span class="var">held</span>: u64): <span class="ty">List</span>(<a href="#L130"><span class="ty">Handler</span></a>) {
+<a class="ln" id="L309" href="#L309">309</a>  <span class="kw">match</span> l {
+<a class="ln" id="L310" href="#L310">310</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L311" href="#L311">311</a>    <span class="ty">Cons</span>(h, rest) =&gt; <span class="kw">if</span> h.held == held { rest } <span class="kw">else</span> {
+<a class="ln" id="L312" href="#L312">312</a>      <span class="ty">Cons</span>(h, <a href="#L308"><span class="fn">drop_handler</span></a>(rest, held))
+<a class="ln" id="L313" href="#L313">313</a>    }
+<a class="ln" id="L314" href="#L314">314</a>  }
+<a class="ln" id="L315" href="#L315">315</a>}
+<a class="ln" id="L316" href="#L316">316</a>
+<a class="ln" id="L317" href="#L317">317</a><span class="com">// Removes the subtree root when the current owner ends. Each handler is separately</span>
+<a class="ln" id="L318" href="#L318">318</a><span class="com">// owned by the scope that registered it, including handlers on descendant nodes.</span>
+<a class="ln" id="L319" href="#L319">319</a><span class="kw">fn</span> <span class="fn">remove_on_cleanup</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L320" href="#L320">320</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L321" href="#L321">321</a>  <span class="var">n</span>: <a href="#L31"><span class="ty">Node</span></a>
+<a class="ln" id="L322" href="#L322">322</a>): <span class="ty">Unit</span> ! {rt} {
+<a class="ln" id="L323" href="#L323">323</a>  <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(() =&gt; {
+<a class="ln" id="L324" href="#L324">324</a>    <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L122"><span class="ty">Remove</span></a>(n))
+<a class="ln" id="L325" href="#L325">325</a>  })
+<a class="ln" id="L326" href="#L326">326</a>}
+<a class="ln" id="L327" href="#L327">327</a>
+<a class="ln" id="L328" href="#L328">328</a><span class="kw">fn</span> <span class="fn">add_handler</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L329" href="#L329">329</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L330" href="#L330">330</a>  <span class="var">n</span>: <a href="#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L331" href="#L331">331</a>  <span class="var">e</span>: <a href="#L34"><span class="ty">EventKind</span></a>,
+<a class="ln" id="L332" href="#L332">332</a>  <span class="var">held</span>: u64
+<a class="ln" id="L333" href="#L333">333</a>): <span class="ty">Unit</span> ! {rt} {
+<a class="ln" id="L334" href="#L334">334</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(
+<a class="ln" id="L335" href="#L335">335</a>    t.handlers,
+<a class="ln" id="L336" href="#L336">336</a>    <span class="ty">Cons</span>(<span class="ty">Handler</span> { node: n.id, kind: e, held: held }, <span class="kw">perform</span> <span class="fn">ref_get</span>(t.handlers))
+<a class="ln" id="L337" href="#L337">337</a>  )
+<a class="ln" id="L338" href="#L338">338</a>  <span class="com">// A node inside a part that ends is not removed itself (only the part's root is),</span>
+<a class="ln" id="L339" href="#L339">339</a>  <span class="com">// so each handler is forgotten when the owner it was made under ends.</span>
+<a class="ln" id="L340" href="#L340">340</a>  <span class="kw">let</span> handlers := t.handlers
+<a class="ln" id="L341" href="#L341">341</a>  <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(() =&gt; {
+<a class="ln" id="L342" href="#L342">342</a>    <a href="../src/signal.taut.html#L338"><span class="fn">release</span></a>(held)
+<a class="ln" id="L343" href="#L343">343</a>    <span class="kw">perform</span> <span class="fn">ref_set</span>(handlers, <a href="#L308"><span class="fn">drop_handler</span></a>(<span class="kw">perform</span> <span class="fn">ref_get</span>(handlers), held))
+<a class="ln" id="L344" href="#L344">344</a>  })
+<a class="ln" id="L345" href="#L345">345</a>}
+<a class="ln" id="L346" href="#L346">346</a>
+<a class="ln" id="L347" href="#L347">347</a><span class="kw">fn</span> <span class="fn">apply_props</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L348" href="#L348">348</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L349" href="#L349">349</a>  <span class="var">n</span>: <a href="#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L350" href="#L350">350</a>  <span class="var">props</span>: <span class="ty">List</span>(<a href="#L94"><span class="ty">Prop</span></a>(<span class="ty">P</span>))
+<a class="ln" id="L351" href="#L351">351</a>): <span class="ty">Unit</span> ! {rt, div, overflow} <span class="kw">where</span> <span class="ty">DecEq</span>(<span class="ty">P</span>) {
+<a class="ln" id="L352" href="#L352">352</a>  <span class="kw">match</span> props {
+<a class="ln" id="L353" href="#L353">353</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L354" href="#L354">354</a>    <span class="ty">Cons</span>(p, rest) =&gt; {
+<a class="ln" id="L355" href="#L355">355</a>      <span class="kw">match</span> p {
+<a class="ln" id="L356" href="#L356">356</a>        <span class="ty">Static</span>(v) =&gt; <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L116"><span class="ty">SetProp</span></a>(n, v))
+<a class="ln" id="L357" href="#L357">357</a>        <span class="ty">Dyn</span>(f) =&gt; {
+<a class="ln" id="L358" href="#L358">358</a>          <span class="kw">let</span> v := <a href="../src/signal.taut.html#L660"><span class="fn">memo_eq</span></a>(() =&gt; <span class="fn">f</span>())
+<a class="ln" id="L359" href="#L359">359</a>          <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L116"><span class="ty">SetProp</span></a>(n, <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(v))))
+<a class="ln" id="L360" href="#L360">360</a>        }
+<a class="ln" id="L361" href="#L361">361</a>        <span class="ty">On</span>(e, h) =&gt; {
+<a class="ln" id="L362" href="#L362">362</a>          <span class="kw">let</span> event := t.event
+<a class="ln" id="L363" href="#L363">363</a>          <a href="#L328"><span class="fn">add_handler</span></a>(t, n, e, <a href="../src/signal.taut.html#L320"><span class="fn">hold</span></a>(() =&gt; <span class="fn">h</span>(<span class="kw">perform</span> <span class="fn">ref_get</span>(event))))
+<a class="ln" id="L364" href="#L364">364</a>        }
+<a class="ln" id="L365" href="#L365">365</a>        <span class="ty">Held</span>(e, held) =&gt; <a href="#L328"><span class="fn">add_handler</span></a>(t, n, e, held)
+<a class="ln" id="L366" href="#L366">366</a>      }
+<a class="ln" id="L367" href="#L367">367</a>      <a href="#L347"><span class="fn">apply_props</span></a>(t, n, rest)
+<a class="ln" id="L368" href="#L368">368</a>    }
+<a class="ln" id="L369" href="#L369">369</a>  }
+<a class="ln" id="L370" href="#L370">370</a>}
+<a class="ln" id="L371" href="#L371">371</a>
+<a class="ln" id="L372" href="#L372">372</a><span class="kw">fn</span> <span class="fn">append_all</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L373" href="#L373">373</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L374" href="#L374">374</a>  <span class="var">parent</span>: <a href="#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L375" href="#L375">375</a>  <span class="var">children</span>: <span class="ty">List</span>(<a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L376" href="#L376">376</a>): <span class="ty">Unit</span> ! {ref_get, ref_set} {
+<a class="ln" id="L377" href="#L377">377</a>  <span class="kw">match</span> children {
+<a class="ln" id="L378" href="#L378">378</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L379" href="#L379">379</a>    <span class="ty">Cons</span>(c, rest) =&gt; {
+<a class="ln" id="L380" href="#L380">380</a>      <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L119"><span class="ty">Append</span></a>(parent, c))
+<a class="ln" id="L381" href="#L381">381</a>      <a href="#L372"><span class="fn">append_all</span></a>(t, parent, rest)
+<a class="ln" id="L382" href="#L382">382</a>    }
+<a class="ln" id="L383" href="#L383">383</a>  }
+<a class="ln" id="L384" href="#L384">384</a>}
+<a class="ln" id="L385" href="#L385">385</a>
+<a class="ln" id="L386" href="#L386">386</a><span class="com">// An element of kind `kind`. Its children are fixed; the parts whose shape changes are</span>
+<a class="ln" id="L387" href="#L387">387</a><span class="com">// `show`, `switch_on` and `keyed_each` nodes among them.</span>
+<a class="ln" id="L388" href="#L388">388</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">el</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L389" href="#L389">389</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L390" href="#L390">390</a>  <span class="var">kind</span>: <span class="ty">K</span>,
+<a class="ln" id="L391" href="#L391">391</a>  <span class="var">props</span>: <span class="ty">List</span>(<a href="#L94"><span class="ty">Prop</span></a>(<span class="ty">P</span>)),
+<a class="ln" id="L392" href="#L392">392</a>  <span class="var">children</span>: <span class="ty">List</span>(<a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L393" href="#L393">393</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} <span class="kw">where</span> <span class="ty">DecEq</span>(<span class="ty">P</span>) {
+<a class="ln" id="L394" href="#L394">394</a>  <span class="kw">let</span> n := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L395" href="#L395">395</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L111"><span class="ty">Create</span></a>(n, kind))
+<a class="ln" id="L396" href="#L396">396</a>  <a href="#L347"><span class="fn">apply_props</span></a>(t, n, props)
+<a class="ln" id="L397" href="#L397">397</a>  <a href="#L372"><span class="fn">append_all</span></a>(t, n, children)
+<a class="ln" id="L398" href="#L398">398</a>  n
+<a class="ln" id="L399" href="#L399">399</a>}
+<a class="ln" id="L400" href="#L400">400</a>
+<a class="ln" id="L401" href="#L401">401</a><span class="com">// A group has no layout box; DOM/HTML keep a display:contents element for it.</span>
+<a class="ln" id="L402" href="#L402">402</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">fragment</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L403" href="#L403">403</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L404" href="#L404">404</a>  <span class="var">children</span>: <span class="ty">List</span>(<a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L405" href="#L405">405</a>): <a href="#L31"><span class="ty">Node</span></a> ! {overflow, ref_get, ref_set} {
+<a class="ln" id="L406" href="#L406">406</a>  <span class="kw">let</span> n := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L407" href="#L407">407</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L115"><span class="ty">CreateGroup</span></a>(n))
+<a class="ln" id="L408" href="#L408">408</a>  <a href="#L372"><span class="fn">append_all</span></a>(t, n, children)
+<a class="ln" id="L409" href="#L409">409</a>  n
+<a class="ln" id="L410" href="#L410">410</a>}
+<a class="ln" id="L411" href="#L411">411</a>
+<a class="ln" id="L412" href="#L412">412</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">text</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L413" href="#L413">413</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L414" href="#L414">414</a>  <span class="var">s</span>: <span class="ty">Text</span>
+<a class="ln" id="L415" href="#L415">415</a>): <a href="#L31"><span class="ty">Node</span></a> ! {overflow, ref_get, ref_set} {
+<a class="ln" id="L416" href="#L416">416</a>  <span class="kw">let</span> n := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L417" href="#L417">417</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L112"><span class="ty">CreateText</span></a>(n, s))
+<a class="ln" id="L418" href="#L418">418</a>  n
+<a class="ln" id="L419" href="#L419">419</a>}
+<a class="ln" id="L420" href="#L420">420</a>
+<a class="ln" id="L421" href="#L421">421</a><span class="com">// Text that follows the signals `f` reads.</span>
+<a class="ln" id="L422" href="#L422">422</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">text_dyn</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L423" href="#L423">423</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L424" href="#L424">424</a>  <span class="var">f</span>: () -&gt; <span class="ty">Text</span> ! {rt, div}
+<a class="ln" id="L425" href="#L425">425</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} {
+<a class="ln" id="L426" href="#L426">426</a>  <span class="kw">let</span> n := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L427" href="#L427">427</a>  <span class="kw">let</span> v := <a href="../src/signal.taut.html#L660"><span class="fn">memo_eq</span></a>(() =&gt; <span class="fn">f</span>())
+<a class="ln" id="L428" href="#L428">428</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L112"><span class="ty">CreateText</span></a>(n, <a href="../src/signal.taut.html#L438"><span class="fn">peek</span></a>(v)))
+<a class="ln" id="L429" href="#L429">429</a>  <span class="com">// The first run only subscribes: the text was created with the value.</span>
+<a class="ln" id="L430" href="#L430">430</a>  <span class="kw">let</span> first := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">true</span>)
+<a class="ln" id="L431" href="#L431">431</a>  <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L432" href="#L432">432</a>    <span class="kw">let</span> s := <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(v)
+<a class="ln" id="L433" href="#L433">433</a>    <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(first) { <span class="kw">perform</span> <span class="fn">ref_set</span>(first, <span class="kw">false</span>) } <span class="kw">else</span> { <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L117"><span class="ty">SetText</span></a>(n, s)) }
+<a class="ln" id="L434" href="#L434">434</a>  })
+<a class="ln" id="L435" href="#L435">435</a>  n
+<a class="ln" id="L436" href="#L436">436</a>}
+<a class="ln" id="L437" href="#L437">437</a>
+<a class="ln" id="L438" href="#L438">438</a><span class="com">// `build()` while `cond()` holds, nothing otherwise. What `build` made ends when the</span>
+<a class="ln" id="L439" href="#L439">439</a><span class="com">// condition turns false.</span>
+<a class="ln" id="L440" href="#L440">440</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">show</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L441" href="#L441">441</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L442" href="#L442">442</a>  <span class="var">cond</span>: () -&gt; <span class="ty">Bool</span> ! {rt, div},
+<a class="ln" id="L443" href="#L443">443</a>  <span class="var">build</span>: () -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L444" href="#L444">444</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} {
+<a class="ln" id="L445" href="#L445">445</a>  <span class="kw">let</span> g := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L446" href="#L446">446</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L115"><span class="ty">CreateGroup</span></a>(g))
+<a class="ln" id="L447" href="#L447">447</a>  <span class="kw">let</span> c := <a href="../src/signal.taut.html#L660"><span class="fn">memo_eq</span></a>(() =&gt; <span class="fn">cond</span>())
+<a class="ln" id="L448" href="#L448">448</a>  <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L449" href="#L449">449</a>    <span class="kw">if</span> <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(c) {
+<a class="ln" id="L450" href="#L450">450</a>      <span class="kw">let</span> n := <a href="../src/signal.taut.html#L673"><span class="fn">untracked</span></a>(() =&gt; <span class="fn">build</span>())
+<a class="ln" id="L451" href="#L451">451</a>      <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L119"><span class="ty">Append</span></a>(g, n))
+<a class="ln" id="L452" href="#L452">452</a>      <a href="#L319"><span class="fn">remove_on_cleanup</span></a>(t, n)
+<a class="ln" id="L453" href="#L453">453</a>    } <span class="kw">else</span> { #() }
+<a class="ln" id="L454" href="#L454">454</a>  })
+<a class="ln" id="L455" href="#L455">455</a>  g
+<a class="ln" id="L456" href="#L456">456</a>}
+<a class="ln" id="L457" href="#L457">457</a>
+<a class="ln" id="L458" href="#L458">458</a><span class="com">// `build(v)` for the value `v` of `f()`, made again only when the value changes.</span>
+<a class="ln" id="L459" href="#L459">459</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">switch_on</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">V</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L460" href="#L460">460</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L461" href="#L461">461</a>  <span class="var">f</span>: () -&gt; <span class="ty">V</span> ! {rt, div},
+<a class="ln" id="L462" href="#L462">462</a>  <span class="var">build</span>: (<span class="ty">V</span>) -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L463" href="#L463">463</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} <span class="kw">where</span> <span class="ty">DecEq</span>(<span class="ty">V</span>) {
+<a class="ln" id="L464" href="#L464">464</a>  <span class="kw">let</span> g := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L465" href="#L465">465</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L115"><span class="ty">CreateGroup</span></a>(g))
+<a class="ln" id="L466" href="#L466">466</a>  <span class="kw">let</span> v := <a href="../src/signal.taut.html#L660"><span class="fn">memo_eq</span></a>(() =&gt; <span class="fn">f</span>())
+<a class="ln" id="L467" href="#L467">467</a>  <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L468" href="#L468">468</a>    <span class="kw">let</span> x := <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(v)
+<a class="ln" id="L469" href="#L469">469</a>    <span class="kw">let</span> n := <a href="../src/signal.taut.html#L673"><span class="fn">untracked</span></a>(() =&gt; <span class="fn">build</span>(x))
+<a class="ln" id="L470" href="#L470">470</a>    <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L119"><span class="ty">Append</span></a>(g, n))
+<a class="ln" id="L471" href="#L471">471</a>    <a href="#L319"><span class="fn">remove_on_cleanup</span></a>(t, n)
+<a class="ln" id="L472" href="#L472">472</a>  })
+<a class="ln" id="L473" href="#L473">473</a>  g
+<a class="ln" id="L474" href="#L474">474</a>}
+<a class="ln" id="L475" href="#L475">475</a>
+<a class="ln" id="L476" href="#L476">476</a><span class="com">// Like `switch_on`, without comparing values: what `f` reads changing builds again, even to the</span>
+<a class="ln" id="L477" href="#L477">477</a><span class="com">// same value. It is what `@match` makes, so a handle (whose value cannot be compared) picks its</span>
+<a class="ln" id="L478" href="#L478">478</a><span class="com">// branch too; wrap `f` in `memo_eq` to build again only for a different value.</span>
+<a class="ln" id="L479" href="#L479">479</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">switch_on_change</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">V</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L480" href="#L480">480</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L481" href="#L481">481</a>  <span class="var">f</span>: () -&gt; <span class="ty">V</span> ! {rt, div},
+<a class="ln" id="L482" href="#L482">482</a>  <span class="var">build</span>: (<span class="ty">V</span>) -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L483" href="#L483">483</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} {
+<a class="ln" id="L484" href="#L484">484</a>  <span class="kw">let</span> g := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L485" href="#L485">485</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L115"><span class="ty">CreateGroup</span></a>(g))
+<a class="ln" id="L486" href="#L486">486</a>  <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L487" href="#L487">487</a>    <span class="kw">let</span> x := <span class="fn">f</span>()
+<a class="ln" id="L488" href="#L488">488</a>    <span class="kw">let</span> n := <a href="../src/signal.taut.html#L673"><span class="fn">untracked</span></a>(() =&gt; <span class="fn">build</span>(x))
+<a class="ln" id="L489" href="#L489">489</a>    <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L119"><span class="ty">Append</span></a>(g, n))
+<a class="ln" id="L490" href="#L490">490</a>    <a href="#L319"><span class="fn">remove_on_cleanup</span></a>(t, n)
+<a class="ln" id="L491" href="#L491">491</a>  })
+<a class="ln" id="L492" href="#L492">492</a>  g
+<a class="ln" id="L493" href="#L493">493</a>}
+<a class="ln" id="L494" href="#L494">494</a>
+<a class="ln" id="L495" href="#L495">495</a><span class="com">// ---- each ---------------------------------------------------------------------------------</span>
+<a class="ln" id="L496" href="#L496">496</a>
+<a class="ln" id="L497" href="#L497">497</a><span class="com">// A row of `keyed_each`: its key, the owner of what it made, and its node.</span>
+<a class="ln" id="L498" href="#L498">498</a><span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">KeyedRow</span> { key: u64, owner: u64, node: <a href="#L31"><span class="ty">Node</span></a> }
+<a class="ln" id="L499" href="#L499">499</a>
+<a class="ln" id="L500" href="#L500">500</a><span class="com">// The rows by key, so finding the row of a key does not walk the rows.</span>
+<a class="ln" id="L501" href="#L501">501</a><span class="kw">fn</span> <span class="fn">rows_by_key</span>(<span class="var">m</span>: &amp;<span class="kw">mut</span> <span class="ty">HashMap</span>(u64, <a href="#L498"><span class="ty">KeyedRow</span></a>), <span class="var">rows</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>)): <span class="ty">Unit</span> {
+<a class="ln" id="L502" href="#L502">502</a>  <span class="kw">match</span> rows {
+<a class="ln" id="L503" href="#L503">503</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L504" href="#L504">504</a>    <span class="ty">Cons</span>(r, rest) =&gt; {
+<a class="ln" id="L505" href="#L505">505</a>      <span class="kw">let</span> old := <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, r.key, r)
+<a class="ln" id="L506" href="#L506">506</a>      <a href="#L501"><span class="fn">rows_by_key</span></a>(&amp;<span class="kw">mut</span> m, rest)
+<a class="ln" id="L507" href="#L507">507</a>    }
+<a class="ln" id="L508" href="#L508">508</a>  }
+<a class="ln" id="L509" href="#L509">509</a>}
+<a class="ln" id="L510" href="#L510">510</a>
+<a class="ln" id="L511" href="#L511">511</a><span class="kw">fn</span> <span class="fn">find_row</span>(<span class="var">m</span>: &amp;<span class="ty">HashMap</span>(u64, <a href="#L498"><span class="ty">KeyedRow</span></a>), <span class="var">k</span>: u64): <span class="ty">Option</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>) {
+<a class="ln" id="L512" href="#L512">512</a>  <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;k) {
+<a class="ln" id="L513" href="#L513">513</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L514" href="#L514">514</a>    <span class="ty">Some</span>(r) =&gt; <span class="ty">Some</span>(<a href="../src/signal.taut.html#L136"><span class="fn">own</span></a>(&amp;r))
+<a class="ln" id="L515" href="#L515">515</a>  }
+<a class="ln" id="L516" href="#L516">516</a>}
+<a class="ln" id="L517" href="#L517">517</a>
+<a class="ln" id="L518" href="#L518">518</a><span class="com">// The keys of `items`, so a row asks whether its key stays without walking the items.</span>
+<a class="ln" id="L519" href="#L519">519</a><span class="kw">fn</span> <span class="fn">keys_of</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L520" href="#L520">520</a>  <span class="var">m</span>: &amp;<span class="kw">mut</span> <span class="ty">HashMap</span>(u64, u64),
+<a class="ln" id="L521" href="#L521">521</a>  <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">A</span>),
+<a class="ln" id="L522" href="#L522">522</a>  <span class="var">key</span>: (<span class="ty">A</span>) -&gt; u64 ! {div}
+<a class="ln" id="L523" href="#L523">523</a>): <span class="ty">Unit</span> ! {div} {
+<a class="ln" id="L524" href="#L524">524</a>  <span class="kw">match</span> l {
+<a class="ln" id="L525" href="#L525">525</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L526" href="#L526">526</a>    <span class="ty">Cons</span>(x, rest) =&gt; {
+<a class="ln" id="L527" href="#L527">527</a>      <a href="#L648"><span class="fn">put</span></a>(&amp;<span class="kw">mut</span> m, <span class="fn">key</span>(x), <span class="num">0</span>)
+<a class="ln" id="L528" href="#L528">528</a>      <a href="#L519"><span class="fn">keys_of</span></a>(&amp;<span class="kw">mut</span> m, rest, key)
+<a class="ln" id="L529" href="#L529">529</a>    }
+<a class="ln" id="L530" href="#L530">530</a>  }
+<a class="ln" id="L531" href="#L531">531</a>}
+<a class="ln" id="L532" href="#L532">532</a>
+<a class="ln" id="L533" href="#L533">533</a><span class="kw">fn</span> <span class="fn">reverse_rows</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>), <span class="var">acc</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>)): <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>) {
+<a class="ln" id="L534" href="#L534">534</a>  <span class="kw">match</span> l {
+<a class="ln" id="L535" href="#L535">535</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L536" href="#L536">536</a>    <span class="ty">Cons</span>(r, rest) =&gt; <a href="#L533"><span class="fn">reverse_rows</span></a>(rest, <span class="ty">Cons</span>(r, acc))
+<a class="ln" id="L537" href="#L537">537</a>  }
+<a class="ln" id="L538" href="#L538">538</a>}
+<a class="ln" id="L539" href="#L539">539</a>
+<a class="ln" id="L540" href="#L540">540</a><span class="com">// Ends the rows whose key is not among `keys`.</span>
+<a class="ln" id="L541" href="#L541">541</a><span class="kw">fn</span> <span class="fn">end_missing</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L542" href="#L542">542</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L543" href="#L543">543</a>  <span class="var">rows</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>),
+<a class="ln" id="L544" href="#L544">544</a>  <span class="var">keys</span>: &amp;<span class="ty">HashMap</span>(u64, u64)
+<a class="ln" id="L545" href="#L545">545</a>): <span class="ty">Unit</span> ! {rt, div, overflow} {
+<a class="ln" id="L546" href="#L546">546</a>  <span class="kw">match</span> rows {
+<a class="ln" id="L547" href="#L547">547</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L548" href="#L548">548</a>    <span class="ty">Cons</span>(r, rest) =&gt; {
+<a class="ln" id="L549" href="#L549">549</a>      <span class="kw">if</span> <a href="#L560"><span class="fn">has_seen</span></a>(&amp;keys, r.key) { #() } <span class="kw">else</span> {
+<a class="ln" id="L550" href="#L550">550</a>        <a href="../src/signal.taut.html#L739"><span class="fn">dispose</span></a>(r.owner)
+<a class="ln" id="L551" href="#L551">551</a>        <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L122"><span class="ty">Remove</span></a>(r.node))
+<a class="ln" id="L552" href="#L552">552</a>      }
+<a class="ln" id="L553" href="#L553">553</a>      <a href="#L541"><span class="fn">end_missing</span></a>(t, rest, &amp;keys)
+<a class="ln" id="L554" href="#L554">554</a>    }
+<a class="ln" id="L555" href="#L555">555</a>  }
+<a class="ln" id="L556" href="#L556">556</a>}
+<a class="ln" id="L557" href="#L557">557</a>
+<a class="ln" id="L558" href="#L558">558</a><span class="com">// The rows for `items` in order, keeping the row of a key that was there before and making</span>
+<a class="ln" id="L559" href="#L559">559</a><span class="com">// the others; newest first.</span>
+<a class="ln" id="L560" href="#L560">560</a><span class="kw">fn</span> <span class="fn">has_seen</span>(<span class="var">m</span>: &amp;<span class="ty">HashMap</span>(u64, u64), <span class="var">k</span>: u64): <span class="ty">Bool</span> {
+<a class="ln" id="L561" href="#L561">561</a>  <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;m, k) {
+<a class="ln" id="L562" href="#L562">562</a>    <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L563" href="#L563">563</a>    <span class="ty">Some</span>(v) =&gt; <span class="kw">true</span>
+<a class="ln" id="L564" href="#L564">564</a>  }
+<a class="ln" id="L565" href="#L565">565</a>}
+<a class="ln" id="L566" href="#L566">566</a>
+<a class="ln" id="L567" href="#L567">567</a><span class="kw">fn</span> <span class="fn">key_reported</span>(<span class="var">keys</span>: <span class="ty">List</span>(u64), <span class="var">k</span>: u64): <span class="ty">Bool</span> {
+<a class="ln" id="L568" href="#L568">568</a>  <span class="kw">match</span> keys {
+<a class="ln" id="L569" href="#L569">569</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L570" href="#L570">570</a>    <span class="ty">Cons</span>(x, rest) =&gt; x == k || <a href="#L567"><span class="fn">key_reported</span></a>(rest, k)
+<a class="ln" id="L571" href="#L571">571</a>  }
+<a class="ln" id="L572" href="#L572">572</a>}
+<a class="ln" id="L573" href="#L573">573</a>
+<a class="ln" id="L574" href="#L574">574</a><span class="com">// Duplicate keys since the last call, once per key, newest first. Rendering still keeps</span>
+<a class="ln" id="L575" href="#L575">575</a><span class="com">// the first item, so diagnostics do not change the existing reconciliation contract.</span>
+<a class="ln" id="L576" href="#L576">576</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">take_duplicate_keys</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L577" href="#L577">577</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>)
+<a class="ln" id="L578" href="#L578">578</a>): <span class="ty">List</span>(u64) ! {ref_get, ref_set} {
+<a class="ln" id="L579" href="#L579">579</a>  <span class="kw">let</span> keys := <span class="kw">perform</span> <span class="fn">ref_get</span>(t.duplicate_keys)
+<a class="ln" id="L580" href="#L580">580</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(t.duplicate_keys, <span class="ty">Nil</span>)
+<a class="ln" id="L581" href="#L581">581</a>  keys
+<a class="ln" id="L582" href="#L582">582</a>}
+<a class="ln" id="L583" href="#L583">583</a>
+<a class="ln" id="L584" href="#L584">584</a><span class="com">// An item whose key an earlier item already has is left out: one key, one row.</span>
+<a class="ln" id="L585" href="#L585">585</a><span class="kw">fn</span> <span class="fn">rows_for</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L586" href="#L586">586</a>  <span class="var">old</span>: &amp;<span class="ty">HashMap</span>(u64, <a href="#L498"><span class="ty">KeyedRow</span></a>),
+<a class="ln" id="L587" href="#L587">587</a>  <span class="var">items</span>: <span class="ty">List</span>(<span class="ty">A</span>),
+<a class="ln" id="L588" href="#L588">588</a>  <span class="var">key</span>: (<span class="ty">A</span>) -&gt; u64 ! {div},
+<a class="ln" id="L589" href="#L589">589</a>  <span class="var">row</span>: (<span class="ty">A</span>) -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div},
+<a class="ln" id="L590" href="#L590">590</a>  <span class="var">duplicates</span>: <span class="ty">Ref</span>(<span class="ty">List</span>(u64)),
+<a class="ln" id="L591" href="#L591">591</a>  <span class="var">seen</span>: &amp;<span class="kw">mut</span> <span class="ty">HashMap</span>(u64, u64),
+<a class="ln" id="L592" href="#L592">592</a>  <span class="var">acc</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>)
+<a class="ln" id="L593" href="#L593">593</a>): <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>) ! {rt, div} {
+<a class="ln" id="L594" href="#L594">594</a>  <span class="kw">match</span> items {
+<a class="ln" id="L595" href="#L595">595</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L596" href="#L596">596</a>    <span class="ty">Cons</span>(x, rest) =&gt; {
+<a class="ln" id="L597" href="#L597">597</a>      <span class="kw">let</span> k := <span class="fn">key</span>(x)
+<a class="ln" id="L598" href="#L598">598</a>      <span class="kw">if</span> <a href="#L560"><span class="fn">has_seen</span></a>(&amp;seen, k) {
+<a class="ln" id="L599" href="#L599">599</a>        <span class="kw">let</span> reported := <span class="kw">perform</span> <span class="fn">ref_get</span>(duplicates)
+<a class="ln" id="L600" href="#L600">600</a>        <span class="kw">if</span> <a href="#L567"><span class="fn">key_reported</span></a>(reported, k) { #() } <span class="kw">else</span> { <span class="kw">perform</span> <span class="fn">ref_set</span>(duplicates, <span class="ty">Cons</span>(k, reported)) }
+<a class="ln" id="L601" href="#L601">601</a>        <a href="#L585"><span class="fn">rows_for</span></a>(&amp;old, rest, key, row, duplicates, &amp;<span class="kw">mut</span> seen, acc)
+<a class="ln" id="L602" href="#L602">602</a>      } <span class="kw">else</span> {
+<a class="ln" id="L603" href="#L603">603</a>        <a href="#L648"><span class="fn">put</span></a>(&amp;<span class="kw">mut</span> seen, k, <span class="num">0</span>)
+<a class="ln" id="L604" href="#L604">604</a>        <span class="kw">let</span> r := <span class="kw">match</span> <a href="#L511"><span class="fn">find_row</span></a>(&amp;old, k) {
+<a class="ln" id="L605" href="#L605">605</a>          <span class="ty">Some</span>(r) =&gt; r
+<a class="ln" id="L606" href="#L606">606</a>          <span class="ty">None</span> =&gt; {
+<a class="ln" id="L607" href="#L607">607</a>            <span class="kw">let</span> made := <a href="../src/signal.taut.html#L727"><span class="fn">scope</span></a>(() =&gt; <a href="../src/signal.taut.html#L673"><span class="fn">untracked</span></a>(() =&gt; <span class="fn">row</span>(x)))
+<a class="ln" id="L608" href="#L608">608</a>            <span class="ty">KeyedRow</span> { key: k, owner: made.owner, node: made.value }
+<a class="ln" id="L609" href="#L609">609</a>          }
+<a class="ln" id="L610" href="#L610">610</a>        }
+<a class="ln" id="L611" href="#L611">611</a>        <a href="#L585"><span class="fn">rows_for</span></a>(&amp;old, rest, key, row, duplicates, &amp;<span class="kw">mut</span> seen, <span class="ty">Cons</span>(r, acc))
+<a class="ln" id="L612" href="#L612">612</a>      }
+<a class="ln" id="L613" href="#L613">613</a>    }
+<a class="ln" id="L614" href="#L614">614</a>  }
+<a class="ln" id="L615" href="#L615">615</a>}
+<a class="ln" id="L616" href="#L616">616</a>
+<a class="ln" id="L617" href="#L617">617</a><span class="kw">fn</span> <span class="fn">append_rows</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L618" href="#L618">618</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L619" href="#L619">619</a>  <span class="var">g</span>: <a href="#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L620" href="#L620">620</a>  <span class="var">rows</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>)
+<a class="ln" id="L621" href="#L621">621</a>): <span class="ty">Unit</span> ! {ref_get, ref_set} {
+<a class="ln" id="L622" href="#L622">622</a>  <span class="kw">match</span> rows {
+<a class="ln" id="L623" href="#L623">623</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L624" href="#L624">624</a>    <span class="ty">Cons</span>(r, rest) =&gt; {
+<a class="ln" id="L625" href="#L625">625</a>      <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L119"><span class="ty">Append</span></a>(g, r.node))
+<a class="ln" id="L626" href="#L626">626</a>      <a href="#L617"><span class="fn">append_rows</span></a>(t, g, rest)
+<a class="ln" id="L627" href="#L627">627</a>    }
+<a class="ln" id="L628" href="#L628">628</a>  }
+<a class="ln" id="L629" href="#L629">629</a>}
+<a class="ln" id="L630" href="#L630">630</a>
+<a class="ln" id="L631" href="#L631">631</a><span class="kw">fn</span> <span class="fn">index_rows</span>(<span class="var">m</span>: &amp;<span class="kw">mut</span> <span class="ty">HashMap</span>(u64, u64), <span class="var">rows</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>), <span class="var">i</span>: u64): <span class="ty">Unit</span> ! {overflow} {
+<a class="ln" id="L632" href="#L632">632</a>  <span class="kw">match</span> rows {
+<a class="ln" id="L633" href="#L633">633</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L634" href="#L634">634</a>    <span class="ty">Cons</span>(r, rest) =&gt; {
+<a class="ln" id="L635" href="#L635">635</a>      <span class="kw">let</span> old := <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, r.key, i)
+<a class="ln" id="L636" href="#L636">636</a>      <a href="#L631"><span class="fn">index_rows</span></a>(&amp;<span class="kw">mut</span> m, rest, i + <span class="num">1</span>)
+<a class="ln" id="L637" href="#L637">637</a>    }
+<a class="ln" id="L638" href="#L638">638</a>  }
+<a class="ln" id="L639" href="#L639">639</a>}
+<a class="ln" id="L640" href="#L640">640</a>
+<a class="ln" id="L641" href="#L641">641</a><span class="kw">fn</span> <span class="fn">at</span>(<span class="var">m</span>: &amp;<span class="ty">HashMap</span>(u64, u64), <span class="var">k</span>: u64): <span class="ty">Option</span>(u64) {
+<a class="ln" id="L642" href="#L642">642</a>  <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;k) {
+<a class="ln" id="L643" href="#L643">643</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L644" href="#L644">644</a>    <span class="ty">Some</span>(v) =&gt; <span class="ty">Some</span>(<a href="../src/signal.taut.html#L136"><span class="fn">own</span></a>(&amp;v))
+<a class="ln" id="L645" href="#L645">645</a>  }
+<a class="ln" id="L646" href="#L646">646</a>}
+<a class="ln" id="L647" href="#L647">647</a>
+<a class="ln" id="L648" href="#L648">648</a><span class="kw">fn</span> <span class="fn">put</span>(<span class="var">m</span>: &amp;<span class="kw">mut</span> <span class="ty">HashMap</span>(u64, u64), <span class="var">k</span>: u64, <span class="var">v</span>: u64): <span class="ty">Unit</span> {
+<a class="ln" id="L649" href="#L649">649</a>  <span class="kw">let</span> old := <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, k, v)
+<a class="ln" id="L650" href="#L650">650</a>}
+<a class="ln" id="L651" href="#L651">651</a>
+<a class="ln" id="L652" href="#L652">652</a><span class="com">// The positions in `rows` that stay where they are: a longest run of rows whose old</span>
+<a class="ln" id="L653" href="#L653">653</a><span class="com">// positions increase. Every other row is moved, so the number of moves is the least.</span>
+<a class="ln" id="L654" href="#L654">654</a><span class="kw">fn</span> <span class="fn">staying</span>(
+<a class="ln" id="L655" href="#L655">655</a>  <span class="var">old</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>),
+<a class="ln" id="L656" href="#L656">656</a>  <span class="var">rows</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>)
+<a class="ln" id="L657" href="#L657">657</a>): <span class="ty">HashMap</span>(u64, u64) ! {div, overflow, hash_seed} {
+<a class="ln" id="L658" href="#L658">658</a>  <span class="kw">var</span> old_at: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L659" href="#L659">659</a>  <a href="#L631"><span class="fn">index_rows</span></a>(&amp;<span class="kw">mut</span> old_at, old, <span class="num">0</span>)
+<a class="ln" id="L660" href="#L660">660</a>  <span class="com">// seq: the new position → the old position, for the rows that were there before.</span>
+<a class="ln" id="L661" href="#L661">661</a>  <span class="kw">var</span> seq: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L662" href="#L662">662</a>  <span class="kw">var</span> n: u64 := <span class="num">0</span>
+<a class="ln" id="L663" href="#L663">663</a>  <span class="kw">var</span> rest := rows
+<a class="ln" id="L664" href="#L664">664</a>  <span class="kw">var</span> going := <span class="kw">true</span>
+<a class="ln" id="L665" href="#L665">665</a>  <span class="kw">while</span> going {
+<a class="ln" id="L666" href="#L666">666</a>    <span class="kw">match</span> rest {
+<a class="ln" id="L667" href="#L667">667</a>      <span class="ty">Nil</span> =&gt; { going := <span class="kw">false</span> }
+<a class="ln" id="L668" href="#L668">668</a>      <span class="ty">Cons</span>(r, more) =&gt; {
+<a class="ln" id="L669" href="#L669">669</a>        <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;old_at, r.key) {
+<a class="ln" id="L670" href="#L670">670</a>          <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L671" href="#L671">671</a>          <span class="ty">Some</span>(o) =&gt; <a href="#L648"><span class="fn">put</span></a>(&amp;<span class="kw">mut</span> seq, n, o)
+<a class="ln" id="L672" href="#L672">672</a>        }
+<a class="ln" id="L673" href="#L673">673</a>        n := n + <span class="num">1</span>
+<a class="ln" id="L674" href="#L674">674</a>        rest := more
+<a class="ln" id="L675" href="#L675">675</a>      }
+<a class="ln" id="L676" href="#L676">676</a>    }
+<a class="ln" id="L677" href="#L677">677</a>  }
+<a class="ln" id="L678" href="#L678">678</a>  <span class="com">// Patience sorting: tails(l) is the new position ending the best run of length l + 1.</span>
+<a class="ln" id="L679" href="#L679">679</a>  <span class="kw">var</span> tails: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L680" href="#L680">680</a>  <span class="kw">var</span> prev: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L681" href="#L681">681</a>  <span class="kw">var</span> len: u64 := <span class="num">0</span>
+<a class="ln" id="L682" href="#L682">682</a>  <span class="kw">var</span> i: u64 := <span class="num">0</span>
+<a class="ln" id="L683" href="#L683">683</a>  <span class="kw">while</span> i &lt; n {
+<a class="ln" id="L684" href="#L684">684</a>    <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;seq, i) {
+<a class="ln" id="L685" href="#L685">685</a>      <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L686" href="#L686">686</a>      <span class="ty">Some</span>(v) =&gt; {
+<a class="ln" id="L687" href="#L687">687</a>        <span class="kw">var</span> lo: u64 := <span class="num">0</span>
+<a class="ln" id="L688" href="#L688">688</a>        <span class="kw">var</span> hi: u64 := len
+<a class="ln" id="L689" href="#L689">689</a>        <span class="kw">while</span> lo &lt; hi {
+<a class="ln" id="L690" href="#L690">690</a>          <span class="kw">let</span> mid := <span class="fn">div</span>(lo + hi, <span class="num">2</span>)
+<a class="ln" id="L691" href="#L691">691</a>          <span class="kw">let</span> tv := <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;tails, mid) {
+<a class="ln" id="L692" href="#L692">692</a>            <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L693" href="#L693">693</a>            <span class="ty">Some</span>(p) =&gt; <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;seq, p) {
+<a class="ln" id="L694" href="#L694">694</a>              <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L695" href="#L695">695</a>              <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L696" href="#L696">696</a>            }
+<a class="ln" id="L697" href="#L697">697</a>          }
+<a class="ln" id="L698" href="#L698">698</a>          <span class="kw">if</span> tv &lt; v { lo := mid + <span class="num">1</span> } <span class="kw">else</span> { hi := mid }
+<a class="ln" id="L699" href="#L699">699</a>        }
+<a class="ln" id="L700" href="#L700">700</a>        <span class="kw">if</span> lo &gt; <span class="num">0</span> {
+<a class="ln" id="L701" href="#L701">701</a>          <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;tails, lo - <span class="num">1</span>) {
+<a class="ln" id="L702" href="#L702">702</a>            <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L703" href="#L703">703</a>            <span class="ty">Some</span>(p) =&gt; <a href="#L648"><span class="fn">put</span></a>(&amp;<span class="kw">mut</span> prev, i, p)
+<a class="ln" id="L704" href="#L704">704</a>          }
+<a class="ln" id="L705" href="#L705">705</a>        } <span class="kw">else</span> { #() }
+<a class="ln" id="L706" href="#L706">706</a>        <a href="#L648"><span class="fn">put</span></a>(&amp;<span class="kw">mut</span> tails, lo, i)
+<a class="ln" id="L707" href="#L707">707</a>        <span class="kw">if</span> lo == len { len := len + <span class="num">1</span> } <span class="kw">else</span> { #() }
+<a class="ln" id="L708" href="#L708">708</a>      }
+<a class="ln" id="L709" href="#L709">709</a>    }
+<a class="ln" id="L710" href="#L710">710</a>    i := i + <span class="num">1</span>
+<a class="ln" id="L711" href="#L711">711</a>  }
+<a class="ln" id="L712" href="#L712">712</a>  <span class="kw">var</span> keep: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L713" href="#L713">713</a>  <span class="kw">if</span> len &gt; <span class="num">0</span> {
+<a class="ln" id="L714" href="#L714">714</a>    <span class="kw">var</span> cur := <a href="#L641"><span class="fn">at</span></a>(&amp;tails, len - <span class="num">1</span>)
+<a class="ln" id="L715" href="#L715">715</a>    <span class="kw">var</span> walking := <span class="kw">true</span>
+<a class="ln" id="L716" href="#L716">716</a>    <span class="kw">while</span> walking {
+<a class="ln" id="L717" href="#L717">717</a>      <span class="kw">match</span> cur {
+<a class="ln" id="L718" href="#L718">718</a>        <span class="ty">None</span> =&gt; { walking := <span class="kw">false</span> }
+<a class="ln" id="L719" href="#L719">719</a>        <span class="ty">Some</span>(p) =&gt; {
+<a class="ln" id="L720" href="#L720">720</a>          <a href="#L648"><span class="fn">put</span></a>(&amp;<span class="kw">mut</span> keep, p, <span class="num">1</span>)
+<a class="ln" id="L721" href="#L721">721</a>          cur := <a href="#L641"><span class="fn">at</span></a>(&amp;prev, p)
+<a class="ln" id="L722" href="#L722">722</a>        }
+<a class="ln" id="L723" href="#L723">723</a>      }
+<a class="ln" id="L724" href="#L724">724</a>    }
+<a class="ln" id="L725" href="#L725">725</a>  } <span class="kw">else</span> { #() }
+<a class="ln" id="L726" href="#L726">726</a>  keep
+<a class="ln" id="L727" href="#L727">727</a>}
+<a class="ln" id="L728" href="#L728">728</a>
+<a class="ln" id="L729" href="#L729">729</a><span class="kw">fn</span> <span class="fn">reverse_indexed</span>(
+<a class="ln" id="L730" href="#L730">730</a>  <span class="var">l</span>: <span class="ty">List</span>(<a href="#L498"><span class="ty">KeyedRow</span></a>),
+<a class="ln" id="L731" href="#L731">731</a>  <span class="var">i</span>: u64,
+<a class="ln" id="L732" href="#L732">732</a>  <span class="var">acc</span>: <span class="ty">List</span>(u64 × <a href="#L498"><span class="ty">KeyedRow</span></a>)
+<a class="ln" id="L733" href="#L733">733</a>): <span class="ty">List</span>(u64 × <a href="#L498"><span class="ty">KeyedRow</span></a>) ! {overflow} {
+<a class="ln" id="L734" href="#L734">734</a>  <span class="kw">match</span> l {
+<a class="ln" id="L735" href="#L735">735</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L736" href="#L736">736</a>    <span class="ty">Cons</span>(r, rest) =&gt; <a href="#L729"><span class="fn">reverse_indexed</span></a>(rest, i + <span class="num">1</span>, <span class="ty">Cons</span>(#(i, r), acc))
+<a class="ln" id="L737" href="#L737">737</a>  }
+<a class="ln" id="L738" href="#L738">738</a>}
+<a class="ln" id="L739" href="#L739">739</a>
+<a class="ln" id="L740" href="#L740">740</a><span class="com">// Puts the rows of `g` in the order of `rows`, from the last one back, moving only the rows</span>
+<a class="ln" id="L741" href="#L741">741</a><span class="com">// that are not staying.</span>
+<a class="ln" id="L742" href="#L742">742</a><span class="kw">fn</span> <span class="fn">place_rows</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L743" href="#L743">743</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L744" href="#L744">744</a>  <span class="var">g</span>: <a href="#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L745" href="#L745">745</a>  <span class="var">back</span>: <span class="ty">List</span>(u64 × <a href="#L498"><span class="ty">KeyedRow</span></a>),
+<a class="ln" id="L746" href="#L746">746</a>  <span class="var">keep</span>: &amp;<span class="ty">HashMap</span>(u64, u64),
+<a class="ln" id="L747" href="#L747">747</a>  <span class="var">anchor</span>: <span class="ty">Option</span>(<a href="#L31"><span class="ty">Node</span></a>)
+<a class="ln" id="L748" href="#L748">748</a>): <span class="ty">Unit</span> ! {div, ref_get, ref_set} {
+<a class="ln" id="L749" href="#L749">749</a>  <span class="kw">match</span> back {
+<a class="ln" id="L750" href="#L750">750</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L751" href="#L751">751</a>    <span class="ty">Cons</span>(p, rest) =&gt; {
+<a class="ln" id="L752" href="#L752">752</a>      <span class="kw">match</span> <a href="#L641"><span class="fn">at</span></a>(&amp;keep, (<span class="var">p</span>: u64)) {
+<a class="ln" id="L753" href="#L753">753</a>        <span class="ty">Some</span>(x) =&gt; #()
+<a class="ln" id="L754" href="#L754">754</a>        <span class="ty">None</span> =&gt; <span class="kw">match</span> anchor {
+<a class="ln" id="L755" href="#L755">755</a>          <span class="ty">None</span> =&gt; <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L119"><span class="ty">Append</span></a>(g, (<span class="var">p</span>: <a href="#L498"><span class="ty">KeyedRow</span></a>).node))
+<a class="ln" id="L756" href="#L756">756</a>          <span class="ty">Some</span>(a) =&gt; <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L121"><span class="ty">InsertBefore</span></a>(g, (<span class="var">p</span>: <a href="#L498"><span class="ty">KeyedRow</span></a>).node, a))
+<a class="ln" id="L757" href="#L757">757</a>        }
+<a class="ln" id="L758" href="#L758">758</a>      }
+<a class="ln" id="L759" href="#L759">759</a>      <a href="#L742"><span class="fn">place_rows</span></a>(t, g, rest, &amp;keep, <span class="ty">Some</span>((<span class="var">p</span>: <a href="#L498"><span class="ty">KeyedRow</span></a>).node))
+<a class="ln" id="L760" href="#L760">760</a>    }
+<a class="ln" id="L761" href="#L761">761</a>  }
+<a class="ln" id="L762" href="#L762">762</a>}
+<a class="ln" id="L763" href="#L763">763</a>
+<a class="ln" id="L764" href="#L764">764</a><span class="com">// A node per item of `items()`, matched by `key`: an item whose key was there before keeps</span>
+<a class="ln" id="L765" href="#L765">765</a><span class="com">// its node and what it made; a new key gets `row(item)`; a key that left ends with its node.</span>
+<a class="ln" id="L766" href="#L766">766</a><span class="com">// Of items with the same key, only the first gets a row. After a change only the rows</span>
+<a class="ln" id="L767" href="#L767">767</a><span class="com">// outside a longest run that kept its order are moved.</span>
+<a class="ln" id="L768" href="#L768">768</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">keyed_each</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L769" href="#L769">769</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L770" href="#L770">770</a>  <span class="var">items</span>: () -&gt; <span class="ty">List</span>(<span class="ty">A</span>) ! {rt, div},
+<a class="ln" id="L771" href="#L771">771</a>  <span class="var">key</span>: (<span class="ty">A</span>) -&gt; u64 ! {div},
+<a class="ln" id="L772" href="#L772">772</a>  <span class="var">row</span>: (<span class="ty">A</span>) -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L773" href="#L773">773</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} {
+<a class="ln" id="L774" href="#L774">774</a>  <span class="kw">let</span> g := <a href="#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L775" href="#L775">775</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L115"><span class="ty">CreateGroup</span></a>(g))
+<a class="ln" id="L776" href="#L776">776</a>  <span class="kw">let</span> rows := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>)
+<a class="ln" id="L777" href="#L777">777</a>  <span class="com">// The rows belong to the owner `keyed_each` was made in, not to the watcher, so a change of</span>
+<a class="ln" id="L778" href="#L778">778</a>  <span class="com">// `items` keeps the rows it keeps.</span>
+<a class="ln" id="L779" href="#L779">779</a>  <span class="kw">let</span> home := <a href="../src/signal.taut.html#L727"><span class="fn">scope</span></a>(() =&gt; #())
+<a class="ln" id="L780" href="#L780">780</a>  <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L781" href="#L781">781</a>    <span class="kw">let</span> xs := <span class="fn">items</span>()
+<a class="ln" id="L782" href="#L782">782</a>    <span class="kw">let</span> old := <span class="kw">perform</span> <span class="fn">ref_get</span>(rows)
+<a class="ln" id="L783" href="#L783">783</a>    <span class="kw">var</span> keys: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L784" href="#L784">784</a>    <a href="#L519"><span class="fn">keys_of</span></a>(&amp;<span class="kw">mut</span> keys, xs, key)
+<a class="ln" id="L785" href="#L785">785</a>    <a href="#L541"><span class="fn">end_missing</span></a>(t, old, &amp;keys)
+<a class="ln" id="L786" href="#L786">786</a>    <span class="kw">let</span> fresh := <a href="#L533"><span class="fn">reverse_rows</span></a>(<a href="../src/signal.taut.html#L804"><span class="fn">in_owner</span></a>(home.owner, () =&gt; {
+<a class="ln" id="L787" href="#L787">787</a>      <span class="kw">var</span> by_key: <span class="ty">HashMap</span>(u64, <a href="#L498"><span class="ty">KeyedRow</span></a>) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L788" href="#L788">788</a>      <a href="#L501"><span class="fn">rows_by_key</span></a>(&amp;<span class="kw">mut</span> by_key, old)
+<a class="ln" id="L789" href="#L789">789</a>      <span class="kw">var</span> seen: <span class="ty">HashMap</span>(u64, u64) := <span class="fn">HashMap::new</span>()
+<a class="ln" id="L790" href="#L790">790</a>      <a href="#L585"><span class="fn">rows_for</span></a>(&amp;by_key, xs, key, row, t.duplicate_keys, &amp;<span class="kw">mut</span> seen, <span class="ty">Nil</span>)
+<a class="ln" id="L791" href="#L791">791</a>    }), <span class="ty">Nil</span>)
+<a class="ln" id="L792" href="#L792">792</a>    <span class="kw">perform</span> <span class="fn">ref_set</span>(rows, fresh)
+<a class="ln" id="L793" href="#L793">793</a>    <span class="kw">match</span> old {
+<a class="ln" id="L794" href="#L794">794</a>      <span class="ty">Nil</span> =&gt; <a href="#L617"><span class="fn">append_rows</span></a>(t, g, fresh)
+<a class="ln" id="L795" href="#L795">795</a>      <span class="ty">Cons</span>(o, more) =&gt; {
+<a class="ln" id="L796" href="#L796">796</a>        <span class="kw">let</span> keep := <a href="#L654"><span class="fn">staying</span></a>(old, fresh)
+<a class="ln" id="L797" href="#L797">797</a>        <a href="#L742"><span class="fn">place_rows</span></a>(t, g, <a href="#L729"><span class="fn">reverse_indexed</span></a>(fresh, <span class="num">0</span>, <span class="ty">Nil</span>), &amp;keep, <span class="ty">None</span>)
+<a class="ln" id="L798" href="#L798">798</a>      }
+<a class="ln" id="L799" href="#L799">799</a>    }
+<a class="ln" id="L800" href="#L800">800</a>  })
+<a class="ln" id="L801" href="#L801">801</a>  <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(() =&gt; <a href="../src/signal.taut.html#L739"><span class="fn">dispose</span></a>(home.owner))
+<a class="ln" id="L802" href="#L802">802</a>  g
+<a class="ln" id="L803" href="#L803">803</a>}
+<a class="ln" id="L804" href="#L804">804</a>
+<a class="ln" id="L805" href="#L805">805</a><span class="com">// `build()`, marked as an instance of the template `id`: every call with the same `id` must</span>
+<a class="ln" id="L806" href="#L806">806</a><span class="com">// make the same elements with the same static properties, differing only in text and in</span>
+<a class="ln" id="L807" href="#L807">807</a><span class="com">// followed properties.</span>
+<a class="ln" id="L808" href="#L808">808</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">template</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L809" href="#L809">809</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L810" href="#L810">810</a>  <span class="var">id</span>: u64,
+<a class="ln" id="L811" href="#L811">811</a>  <span class="var">build</span>: () -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L812" href="#L812">812</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div} {
+<a class="ln" id="L813" href="#L813">813</a>  <span class="kw">let</span> n := <span class="fn">build</span>()
+<a class="ln" id="L814" href="#L814">814</a>  <a href="#L162"><span class="fn">emit</span></a>(t, <a href="#L125"><span class="ty">Template</span></a>(id, n))
+<a class="ln" id="L815" href="#L815">815</a>  n
+<a class="ln" id="L816" href="#L816">816</a>}
+<a class="ln" id="L817" href="#L817">817</a>
+<a class="ln" id="L818" href="#L818">818</a><span class="com">// What a row of `keyed_each_signal` may be keyed by: a `Nat` or a `u64`.</span>
+<a class="ln" id="L819" href="#L819">819</a><span class="kw">pub</span> <span class="kw">class</span> <span class="ty">RowKey</span>(<span class="ty">R</span>: <span class="ty">Type</span>) {
+<a class="ln" id="L820" href="#L820">820</a>  <span class="kw">fn</span> <span class="fn">row_key</span>(<span class="var">r</span>: <span class="ty">R</span>): <span class="ty">Nat</span>
+<a class="ln" id="L821" href="#L821">821</a>}
+<a class="ln" id="L822" href="#L822">822</a><span class="kw">instance</span> <span class="ty">RowKey</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L823" href="#L823">823</a>  <span class="kw">fn</span> <span class="fn">row_key</span>(<span class="var">r</span>: <span class="ty">Nat</span>): <span class="ty">Nat</span> { r }
+<a class="ln" id="L824" href="#L824">824</a>}
+<a class="ln" id="L825" href="#L825">825</a><span class="kw">instance</span> <span class="ty">RowKey</span>(u64) {
+<a class="ln" id="L826" href="#L826">826</a>  <span class="kw">fn</span> <span class="fn">row_key</span>(<span class="var">r</span>: u64): <span class="ty">Nat</span> { <span class="fn">Nat::of_u64</span>(r) }
+<a class="ln" id="L827" href="#L827">827</a>}
+<a class="ln" id="L828" href="#L828">828</a>
+<a class="ln" id="L829" href="#L829">829</a><span class="com">// Like keyed_each, with a live value per retained key. The row is built once; use get(item)</span>
+<a class="ln" id="L830" href="#L830">830</a><span class="com">// in text_dyn or Dyn to follow changes without losing focus, handlers or row-local state.</span>
+<a class="ln" id="L831" href="#L831">831</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">keyed_each_signal</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">R</span>&gt;(
+<a class="ln" id="L832" href="#L832">832</a>  <span class="var">t</span>: <a href="#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L833" href="#L833">833</a>  <span class="var">items</span>: () -&gt; <span class="ty">List</span>(<span class="ty">A</span>) ! {rt, div},
+<a class="ln" id="L834" href="#L834">834</a>  <span class="var">key_by</span>: (<span class="ty">A</span>) -&gt; <span class="ty">R</span> ! {div},
+<a class="ln" id="L835" href="#L835">835</a>  <span class="var">row</span>: (<span class="ty">delim::src::signal::Signal</span>(<span class="ty">A</span>)) -&gt; <a href="#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L836" href="#L836">836</a>): <a href="#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} <span class="kw">where</span> <span class="ty">RowKey</span>(<span class="ty">R</span>) {
+<a class="ln" id="L837" href="#L837">837</a>  <span class="kw">let</span> key := (<span class="var">a</span>: <span class="ty">A</span>) =&gt; <span class="fn">U64::of_nat</span>(<a href="#L820"><span class="fn">RowKey::row_key</span></a>(<span class="fn">key_by</span>(a)))
+<a class="ln" id="L838" href="#L838">838</a>  <span class="kw">let</span> values := <a href="../src/signal.taut.html#L649"><span class="fn">memo</span></a>(items)
+<a class="ln" id="L839" href="#L839">839</a>  <a href="#L768"><span class="fn">keyed_each</span></a>(t, () =&gt; <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(values), key, (<span class="var">initial</span>: <span class="ty">A</span>) =&gt; {
+<a class="ln" id="L840" href="#L840">840</a>    <span class="kw">let</span> k := <span class="fn">key</span>(initial)
+<a class="ln" id="L841" href="#L841">841</a>    <span class="kw">let</span> item := <a href="../src/signal.taut.html#L649"><span class="fn">memo</span></a>(() =&gt; <a href="#L846"><span class="fn">item_for_key</span></a>(<a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(values), key, k, initial))
+<a class="ln" id="L842" href="#L842">842</a>    <span class="fn">row</span>(item)
+<a class="ln" id="L843" href="#L843">843</a>  })
+<a class="ln" id="L844" href="#L844">844</a>}
+<a class="ln" id="L845" href="#L845">845</a>
+<a class="ln" id="L846" href="#L846">846</a><span class="kw">fn</span> <span class="fn">item_for_key</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L847" href="#L847">847</a>  <span class="var">xs</span>: <span class="ty">List</span>(<span class="ty">A</span>),
+<a class="ln" id="L848" href="#L848">848</a>  <span class="var">key</span>: (<span class="ty">A</span>) -&gt; u64 ! {div},
+<a class="ln" id="L849" href="#L849">849</a>  <span class="var">k</span>: u64,
+<a class="ln" id="L850" href="#L850">850</a>  <span class="var">fallback</span>: <span class="ty">A</span>
+<a class="ln" id="L851" href="#L851">851</a>): <span class="ty">A</span> ! {div} {
+<a class="ln" id="L852" href="#L852">852</a>  <span class="kw">match</span> xs {
+<a class="ln" id="L853" href="#L853">853</a>    <span class="ty">Nil</span> =&gt; fallback
+<a class="ln" id="L854" href="#L854">854</a>    <span class="ty">Cons</span>(x, rest) =&gt; <span class="kw">if</span> <span class="fn">key</span>(x) == k { x } <span class="kw">else</span> { <a href="#L846"><span class="fn">item_for_key</span></a>(rest, key, k, fallback) }
+<a class="ln" id="L855" href="#L855">855</a>  }
+<a class="ln" id="L856" href="#L856">856</a>}
+</code></pre>
+</html>

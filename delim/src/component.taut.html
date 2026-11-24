@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/component.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/component.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;signal.taut&quot;</span> { on_cleanup, rt }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;tree.taut&quot;</span> { <span class="ty">Node</span>, <span class="ty">Patch</span>, <span class="ty">Tree</span>, emit, node_of }
+<a class="ln" id="L3" href="#L3">3</a>
+<a class="ln" id="L4" href="#L4">4</a><span class="com">// Conventions for components. A component is a function from its props and its children</span>
+<a class="ln" id="L5" href="#L5">5</a><span class="com">// (`List(Node)`) to a `Node`; what it needs from around it shows in its effect row:</span>
+<a class="ln" id="L6" href="#L6">6</a><span class="com">// `rt` for signals, `context(A)` for a context (`context.taut`), `fail(Text)` for an error</span>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// an `error_boundary` above it can catch.</span>
+<a class="ln" id="L8" href="#L8">8</a>
+<a class="ln" id="L9" href="#L9">9</a><span class="com">// `body()`, or `fallback(why)` if `body` fails with `fail(why)` before it returns. The</span>
+<a class="ln" id="L10" href="#L10">10</a><span class="com">// nodes `body` made before failing were never put anywhere, so none of them is shown.</span>
+<a class="ln" id="L11" href="#L11">11</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">error_boundary_in</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, !e&gt;(
+<a class="ln" id="L12" href="#L12">12</a>  <span class="var">t</span>: <a href="../src/tree.taut.html#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L13" href="#L13">13</a>  <span class="var">body</span>: () -&gt; <a href="../src/tree.taut.html#L31"><span class="ty">Node</span></a> ! {rt, div, <span class="fn">fail</span>(<span class="ty">Text</span>)} ∪ e,
+<a class="ln" id="L14" href="#L14">14</a>  <span class="var">fallback</span>: (<span class="ty">Text</span>) -&gt; <a href="../src/tree.taut.html#L31"><span class="ty">Node</span></a> ! {rt, div} ∪ e
+<a class="ln" id="L15" href="#L15">15</a>): <a href="../src/tree.taut.html#L31"><span class="ty">Node</span></a> ! {rt, div} ∪ e {
+<a class="ln" id="L16" href="#L16">16</a>  <span class="kw">handle</span> { <span class="fn">body</span>() } <span class="kw">with</span> {
+<a class="ln" id="L17" href="#L17">17</a>    <span class="fn">fail</span>&lt;<span class="ty">Text</span>&gt;(why) =&gt; <span class="fn">fallback</span>(why)
+<a class="ln" id="L18" href="#L18">18</a>    <span class="kw">return</span> n =&gt; n
+<a class="ln" id="L19" href="#L19">19</a>  }
+<a class="ln" id="L20" href="#L20">20</a>}
+<a class="ln" id="L21" href="#L21">21</a>
+<a class="ln" id="L22" href="#L22">22</a><span class="com">// Puts what `body` builds under `target`, another node (a modal layer, say), instead of</span>
+<a class="ln" id="L23" href="#L23">23</a><span class="com">// where the portal stands, and takes it away when the portal's owner ends. The portal itself</span>
+<a class="ln" id="L24" href="#L24">24</a><span class="com">// leaves an empty group in its place. Events of the moved nodes reach their handlers as for</span>
+<a class="ln" id="L25" href="#L25">25</a><span class="com">// any node: handlers belong to the tree, not to the place.</span>
+<a class="ln" id="L26" href="#L26">26</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">portal</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">P</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L27" href="#L27">27</a>  <span class="var">t</span>: <a href="../src/tree.taut.html#L132"><span class="ty">Tree</span></a>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L28" href="#L28">28</a>  <span class="var">target</span>: <a href="../src/tree.taut.html#L31"><span class="ty">Node</span></a>,
+<a class="ln" id="L29" href="#L29">29</a>  <span class="var">body</span>: () -&gt; <a href="../src/tree.taut.html#L31"><span class="ty">Node</span></a> ! {rt, div}
+<a class="ln" id="L30" href="#L30">30</a>): <a href="../src/tree.taut.html#L31"><span class="ty">Node</span></a> ! {rt, div, overflow} {
+<a class="ln" id="L31" href="#L31">31</a>  <span class="kw">let</span> g := <a href="../src/tree.taut.html#L154"><span class="fn">node_of</span></a>(t)
+<a class="ln" id="L32" href="#L32">32</a>  <a href="../src/tree.taut.html#L162"><span class="fn">emit</span></a>(t, <a href="../src/tree.taut.html#L115"><span class="ty">CreateGroup</span></a>(g))
+<a class="ln" id="L33" href="#L33">33</a>  <span class="kw">let</span> n := <span class="fn">body</span>()
+<a class="ln" id="L34" href="#L34">34</a>  <a href="../src/tree.taut.html#L162"><span class="fn">emit</span></a>(t, <a href="../src/tree.taut.html#L119"><span class="ty">Append</span></a>(target, n))
+<a class="ln" id="L35" href="#L35">35</a>  <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(() =&gt; <a href="../src/tree.taut.html#L162"><span class="fn">emit</span></a>(t, <a href="../src/tree.taut.html#L122"><span class="ty">Remove</span></a>(n)))
+<a class="ln" id="L36" href="#L36">36</a>  g
+<a class="ln" id="L37" href="#L37">37</a>}
+</code></pre>
+</html>

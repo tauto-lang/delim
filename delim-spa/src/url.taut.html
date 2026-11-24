@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/url.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/url.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="com">// Percent-encoding of path segments and query values, so that a key or a route parameter</span>
+<a class="ln" id="L2" href="#L2">2</a><span class="com">// arrives as it was written, whatever bytes it has.</span>
+<a class="ln" id="L3" href="#L3">3</a>
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">fn</span> <span class="fn">hex_value</span>(<span class="var">c</span>: u64): <span class="ty">Option</span>(u64) ! {overflow} {
+<a class="ln" id="L5" href="#L5">5</a>  <span class="kw">if</span> c &gt;= <span class="num">48</span> &amp;&amp; c &lt;= <span class="num">57</span> { <span class="ty">Some</span>(c - <span class="num">48</span>) } <span class="kw">else</span> <span class="kw">if</span> c &gt;= <span class="num">65</span> &amp;&amp; c &lt;= <span class="num">70</span> {
+<a class="ln" id="L6" href="#L6">6</a>    <span class="ty">Some</span>(c - <span class="num">55</span>)
+<a class="ln" id="L7" href="#L7">7</a>  } <span class="kw">else</span> <span class="kw">if</span> c &gt;= <span class="num">97</span> &amp;&amp; c &lt;= <span class="num">102</span> {
+<a class="ln" id="L8" href="#L8">8</a>    <span class="ty">Some</span>(c - <span class="num">87</span>)
+<a class="ln" id="L9" href="#L9">9</a>  } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L10" href="#L10">10</a>}
+<a class="ln" id="L11" href="#L11">11</a>
+<a class="ln" id="L12" href="#L12">12</a><span class="kw">fn</span> <span class="fn">reverse_bytes</span>(<span class="var">l</span>: <span class="ty">List</span>(u8), <span class="var">acc</span>: <span class="ty">List</span>(u8)): <span class="ty">List</span>(u8) {
+<a class="ln" id="L13" href="#L13">13</a>  <span class="kw">match</span> l {
+<a class="ln" id="L14" href="#L14">14</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L15" href="#L15">15</a>    <span class="ty">Cons</span>(b, rest) =&gt; <a href="#L12"><span class="fn">reverse_bytes</span></a>(rest, <span class="ty">Cons</span>(b, acc))
+<a class="ln" id="L16" href="#L16">16</a>  }
+<a class="ln" id="L17" href="#L17">17</a>}
+<a class="ln" id="L18" href="#L18">18</a>
+<a class="ln" id="L19" href="#L19">19</a><span class="com">// The bytes of `t` from `i` with each `%XY` read as one byte, newest first in `acc`; `None`</span>
+<a class="ln" id="L20" href="#L20">20</a><span class="com">// for a `%` without two hex digits. With `plus`, as in a form, a `+` is a space.</span>
+<a class="ln" id="L21" href="#L21">21</a><span class="kw">fn</span> <span class="fn">decoded_bytes</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">i</span>: u64, <span class="var">acc</span>: <span class="ty">List</span>(u8), <span class="var">plus</span>: <span class="ty">Bool</span>): <span class="ty">Option</span>(<span class="ty">List</span>(u8)) ! {overflow, div} {
+<a class="ln" id="L22" href="#L22">22</a>  <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L23" href="#L23">23</a>    <span class="ty">None</span> =&gt; <span class="ty">Some</span>(<a href="#L12"><span class="fn">reverse_bytes</span></a>(acc, <span class="ty">Nil</span>))
+<a class="ln" id="L24" href="#L24">24</a>    <span class="ty">Some</span>(b) =&gt; <span class="kw">if</span> <span class="fn">U64::of_u8</span>(b) == <span class="num">37</span> {
+<a class="ln" id="L25" href="#L25">25</a>      <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i + <span class="num">1</span>) {
+<a class="ln" id="L26" href="#L26">26</a>        <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L27" href="#L27">27</a>        <span class="ty">Some</span>(h) =&gt; <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i + <span class="num">2</span>) {
+<a class="ln" id="L28" href="#L28">28</a>          <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L29" href="#L29">29</a>          <span class="ty">Some</span>(l) =&gt; <span class="kw">match</span> <a href="#L4"><span class="fn">hex_value</span></a>(<span class="fn">U64::of_u8</span>(h)) {
+<a class="ln" id="L30" href="#L30">30</a>            <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L31" href="#L31">31</a>            <span class="ty">Some</span>(hv) =&gt; <span class="kw">match</span> <a href="#L4"><span class="fn">hex_value</span></a>(<span class="fn">U64::of_u8</span>(l)) {
+<a class="ln" id="L32" href="#L32">32</a>              <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L33" href="#L33">33</a>              <span class="ty">Some</span>(lv) =&gt; <a href="#L21"><span class="fn">decoded_bytes</span></a>(t, i + <span class="num">3</span>, <span class="ty">Cons</span>(<span class="fn">U8::of_u64</span>(hv * <span class="num">16</span> + lv), acc), plus)
+<a class="ln" id="L34" href="#L34">34</a>            }
+<a class="ln" id="L35" href="#L35">35</a>          }
+<a class="ln" id="L36" href="#L36">36</a>        }
+<a class="ln" id="L37" href="#L37">37</a>      }
+<a class="ln" id="L38" href="#L38">38</a>    } <span class="kw">else</span> <span class="kw">if</span> plus &amp;&amp; <span class="fn">U64::of_u8</span>(b) == <span class="num">43</span> {
+<a class="ln" id="L39" href="#L39">39</a>      <a href="#L21"><span class="fn">decoded_bytes</span></a>(t, i + <span class="num">1</span>, <span class="ty">Cons</span>(<span class="fn">U8::of_u64</span>(<span class="num">32</span>), acc), plus)
+<a class="ln" id="L40" href="#L40">40</a>    } <span class="kw">else</span> {
+<a class="ln" id="L41" href="#L41">41</a>      <a href="#L21"><span class="fn">decoded_bytes</span></a>(t, i + <span class="num">1</span>, <span class="ty">Cons</span>(b, acc), plus)
+<a class="ln" id="L42" href="#L42">42</a>    }
+<a class="ln" id="L43" href="#L43">43</a>  }
+<a class="ln" id="L44" href="#L44">44</a>}
+<a class="ln" id="L45" href="#L45">45</a>
+<a class="ln" id="L46" href="#L46">46</a><span class="com">// `t` with its percent-escapes read; `None` when they are broken or the bytes are not UTF-8.</span>
+<a class="ln" id="L47" href="#L47">47</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">percent_decode</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {overflow, div} {
+<a class="ln" id="L48" href="#L48">48</a>  <span class="kw">match</span> <a href="#L21"><span class="fn">decoded_bytes</span></a>(t, <span class="num">0</span>, <span class="ty">Nil</span>, <span class="kw">false</span>) {
+<a class="ln" id="L49" href="#L49">49</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L50" href="#L50">50</a>    <span class="ty">Some</span>(bs) =&gt; <span class="fn">Text::of_utf8</span>(bs)
+<a class="ln" id="L51" href="#L51">51</a>  }
+<a class="ln" id="L52" href="#L52">52</a>}
+<a class="ln" id="L53" href="#L53">53</a>
+<a class="ln" id="L54" href="#L54">54</a><span class="com">// A name or value of an `application/x-www-form-urlencoded` body: `+` is a space, then the</span>
+<a class="ln" id="L55" href="#L55">55</a><span class="com">// percent-escapes are read.</span>
+<a class="ln" id="L56" href="#L56">56</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">form_decode</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {overflow, div} {
+<a class="ln" id="L57" href="#L57">57</a>  <span class="kw">match</span> <a href="#L21"><span class="fn">decoded_bytes</span></a>(t, <span class="num">0</span>, <span class="ty">Nil</span>, <span class="kw">true</span>) {
+<a class="ln" id="L58" href="#L58">58</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L59" href="#L59">59</a>    <span class="ty">Some</span>(bs) =&gt; <span class="fn">Text::of_utf8</span>(bs)
+<a class="ln" id="L60" href="#L60">60</a>  }
+<a class="ln" id="L61" href="#L61">61</a>}
+<a class="ln" id="L62" href="#L62">62</a>
+<a class="ln" id="L63" href="#L63">63</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">hex_digit</span>(<span class="var">n</span>: u64): <span class="ty">Text</span> ! {overflow} {
+<a class="ln" id="L64" href="#L64">64</a>  <span class="kw">match</span> <span class="fn">Text::slice</span>(<span class="str">&quot;0123456789ABCDEF&quot;</span>, n, n + <span class="num">1</span>) {
+<a class="ln" id="L65" href="#L65">65</a>    <span class="ty">Some</span>(d) =&gt; d
+<a class="ln" id="L66" href="#L66">66</a>    <span class="ty">None</span> =&gt; <span class="str">&quot;0&quot;</span>
+<a class="ln" id="L67" href="#L67">67</a>  }
+<a class="ln" id="L68" href="#L68">68</a>}
+<a class="ln" id="L69" href="#L69">69</a>
+<a class="ln" id="L70" href="#L70">70</a><span class="com">// Letters, digits and `-._~` stay; every other byte is written `%XY`.</span>
+<a class="ln" id="L71" href="#L71">71</a><span class="kw">fn</span> <span class="fn">unreserved</span>(<span class="var">c</span>: u64): <span class="ty">Bool</span> {
+<a class="ln" id="L72" href="#L72">72</a>  (c &gt;= <span class="num">48</span> &amp;&amp; c &lt;= <span class="num">57</span>) || (c &gt;= <span class="num">65</span> &amp;&amp; c &lt;= <span class="num">90</span>) || (c &gt;= <span class="num">97</span> &amp;&amp; c &lt;= <span class="num">122</span>) || c == <span class="num">45</span> || c == <span class="num">46</span> || c == <span class="num">95</span> || c == <span class="num">126</span>
+<a class="ln" id="L73" href="#L73">73</a>}
+<a class="ln" id="L74" href="#L74">74</a>
+<a class="ln" id="L75" href="#L75">75</a><span class="com">// Written into one buffer in a loop, so that the time is linear in the length of `t`.</span>
+<a class="ln" id="L76" href="#L76">76</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">percent_encode</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">Text</span> ! {overflow, div} {
+<a class="ln" id="L77" href="#L77">77</a>  <span class="kw">var</span> b := <span class="fn">Buf::new</span>()
+<a class="ln" id="L78" href="#L78">78</a>  <span class="kw">var</span> i: u64 := <span class="num">0</span>
+<a class="ln" id="L79" href="#L79">79</a>  <span class="kw">let</span> n := <span class="fn">Text::len</span>(t)
+<a class="ln" id="L80" href="#L80">80</a>  <span class="kw">while</span> i &lt; n {
+<a class="ln" id="L81" href="#L81">81</a>    <span class="kw">let</span> c := <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L82" href="#L82">82</a>      <span class="ty">Some</span>(x) =&gt; <span class="fn">U64::of_u8</span>(x)
+<a class="ln" id="L83" href="#L83">83</a>      <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L84" href="#L84">84</a>    }
+<a class="ln" id="L85" href="#L85">85</a>    <span class="kw">let</span> piece := <span class="kw">if</span> <a href="#L71"><span class="fn">unreserved</span></a>(c) { <span class="kw">match</span> <span class="fn">Text::slice</span>(t, i, i + <span class="num">1</span>) {
+<a class="ln" id="L86" href="#L86">86</a>        <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L87" href="#L87">87</a>        <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L88" href="#L88">88</a>      } } <span class="kw">else</span> { <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;%&quot;</span>, <a href="#L63"><span class="fn">hex_digit</span></a>(<span class="fn">div</span>(c, <span class="num">16</span>))), <a href="#L63"><span class="fn">hex_digit</span></a>(<span class="fn">mod</span>(c, <span class="num">16</span>))) }
+<a class="ln" id="L89" href="#L89">89</a>    <span class="fn">Buf::push</span>(&amp;<span class="kw">mut</span> b, &amp;piece)
+<a class="ln" id="L90" href="#L90">90</a>    i := i + <span class="num">1</span>
+<a class="ln" id="L91" href="#L91">91</a>  }
+<a class="ln" id="L92" href="#L92">92</a>  <span class="fn">Text::of</span>(b)
+<a class="ln" id="L93" href="#L93">93</a>}
+</code></pre>
+</html>

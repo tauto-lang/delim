@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/markup.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/markup.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/common.taut&quot;</span> { <span class="ty">Role</span>, <span class="ty">Vocab</span> }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;policy.taut&quot;</span> { <span class="ty">Attr</span>, tag_allowed, tag_void, url_allowed }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> <span class="str">&quot;safe.taut&quot;</span> { <span class="ty">TrustedHtml</span>, checked_bytes, escaped_bytes, trusted_bytes }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;svg.taut&quot;</span> { <span class="ty">Css</span> }
+<a class="ln" id="L5" href="#L5">5</a>
+<a class="ln" id="L6" href="#L6">6</a><span class="com">// What the DOM renderer and the HTML one share: element kinds are tag names and properties</span>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// are attributes.</span>
+<a class="ln" id="L8" href="#L8">8</a>
+<a class="ln" id="L9" href="#L9">9</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">HtmlKind</span> {
+<a class="ln" id="L10" href="#L10">10</a>  <span class="ty">Tag</span>(<span class="ty">Text</span>)
+<a class="ln" id="L11" href="#L11">11</a>  <span class="com">// An island named `name`, with the text its view starts from and its first render as</span>
+<a class="ln" id="L12" href="#L12">12</a>  <span class="com">// HTML: the browser hydrates it alone, the rest of the page stays as the server wrote it.</span>
+<a class="ln" id="L13" href="#L13">13</a>  <span class="ty">Island</span>(<span class="ty">Text</span>, <span class="ty">Text</span>, <a href="../src/safe.taut.html#L332"><span class="ty">TrustedHtml</span></a>)
+<a class="ln" id="L14" href="#L14">14</a>  <span class="com">// HTML written as it is, by `trusted`.</span>
+<a class="ln" id="L15" href="#L15">15</a>  <span class="ty">Trusted</span>(<a href="../src/safe.taut.html#L332"><span class="ty">TrustedHtml</span></a>)
+<a class="ln" id="L16" href="#L16">16</a>  <span class="com">// An SVG element (`svg.taut` lists them), made in the SVG namespace by the DOM renderer.</span>
+<a class="ln" id="L17" href="#L17">17</a>  <span class="com">// The HTML renderer writes it as a refused element: `html_safe` has no SVG.</span>
+<a class="ln" id="L18" href="#L18">18</a>  <span class="ty">Svg</span>(<span class="ty">Text</span>)
+<a class="ln" id="L19" href="#L19">19</a>}
+<a class="ln" id="L20" href="#L20">20</a>
+<a class="ln" id="L21" href="#L21">21</a><span class="com">// HTML written into a page as it is: a `TrustedHtml` (`safe.taut`), whose bytes come with a</span>
+<a class="ln" id="L22" href="#L22">22</a><span class="com">// proof that `html_safe` accepts them. Every other text a view shows is escaped.</span>
+<a class="ln" id="L23" href="#L23">23</a>
+<a class="ln" id="L24" href="#L24">24</a><span class="com">// Text as HTML that shows it: `&amp;`, `&lt;`, `&gt;` and `&quot;` escaped.</span>
+<a class="ln" id="L25" href="#L25">25</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">escaped_html</span>(<span class="var">t</span>: <span class="ty">Text</span>): <a href="../src/safe.taut.html#L332"><span class="ty">TrustedHtml</span></a> ! {div, overflow} { <a href="../src/safe.taut.html#L343"><span class="fn">escaped_bytes</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(t)) }
+<a class="ln" id="L26" href="#L26">26</a>
+<a class="ln" id="L27" href="#L27">27</a><span class="com">// `html` as trusted HTML, when `html_safe` accepts it: the output of a renderer such as a</span>
+<a class="ln" id="L28" href="#L28">28</a><span class="com">// Markdown or highlighting one, checked as it is written into the page. `None` when it has</span>
+<a class="ln" id="L29" href="#L29">29</a><span class="com">// anything `html_safe` refuses, such as a script, a handler, or a URL that runs code.</span>
+<a class="ln" id="L30" href="#L30">30</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">checked_html</span>(<span class="var">html</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<a href="../src/safe.taut.html#L332"><span class="ty">TrustedHtml</span></a>) ! {div, overflow} {
+<a class="ln" id="L31" href="#L31">31</a>  <a href="../src/safe.taut.html#L355"><span class="fn">checked_bytes</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(html))
+<a class="ln" id="L32" href="#L32">32</a>}
+<a class="ln" id="L33" href="#L33">33</a>
+<a class="ln" id="L34" href="#L34">34</a><span class="com">// The HTML as text.</span>
+<a class="ln" id="L35" href="#L35">35</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">trusted_text</span>(<span class="var">h</span>: <a href="../src/safe.taut.html#L332"><span class="ty">TrustedHtml</span></a>): <span class="ty">Text</span> ! {div, overflow} { <a href="#L137"><span class="fn">text_of_byte_list</span></a>(<a href="../src/safe.taut.html#L336"><span class="fn">trusted_bytes</span></a>(h)) }
+<a class="ln" id="L36" href="#L36">36</a>
+<a class="ln" id="L37" href="#L37">37</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">HtmlAttr</span> {
+<a class="ln" id="L38" href="#L38">38</a>  <span class="ty">Attr</span>(<span class="ty">Text</span>, <span class="ty">Text</span>)
+<a class="ln" id="L39" href="#L39">39</a>  <span class="com">// A role for assistive technology and the element's name; an empty name sets none.</span>
+<a class="ln" id="L40" href="#L40">40</a>  <span class="ty">Aria</span>(<span class="ty">Text</span>, <span class="ty">Text</span>)
+<a class="ln" id="L41" href="#L41">41</a>  <span class="com">// The live DOM value; HTML uses textarea text, select option selection, or an attribute.</span>
+<a class="ln" id="L42" href="#L42">42</a>  <span class="ty">Value</span>(<span class="ty">Text</span>)
+<a class="ln" id="L43" href="#L43">43</a>  <span class="ty">Disabled</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L44" href="#L44">44</a>  <span class="ty">Checked</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L45" href="#L45">45</a>  <span class="ty">Selected</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L46" href="#L46">46</a>  <span class="ty">Multiple</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L47" href="#L47">47</a>  <span class="ty">Hidden</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L48" href="#L48">48</a>  <span class="ty">Required</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L49" href="#L49">49</a>  <span class="ty">ReadOnly</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L50" href="#L50">50</a>  <span class="com">// None removes the attribute; names and present values still pass the policy.</span>
+<a class="ln" id="L51" href="#L51">51</a>  <span class="ty">OptionalAttr</span>(<span class="ty">Text</span>, <span class="ty">Option</span>(<span class="ty">Text</span>))
+<a class="ln" id="L52" href="#L52">52</a>  <span class="com">// An attribute of an SVG element, from the list in `svg.taut`.</span>
+<a class="ln" id="L53" href="#L53">53</a>  <span class="ty">SvgAttr</span>(<span class="ty">Text</span>, <span class="ty">Text</span>)
+<a class="ln" id="L54" href="#L54">54</a>  <span class="com">// A CSS custom property (`--name`) of the element, for its style sheet to read with</span>
+<a class="ln" id="L55" href="#L55">55</a>  <span class="com">// `var(--name)`: how a view places and sizes an element. Only the DOM renderer sets it.</span>
+<a class="ln" id="L56" href="#L56">56</a>  <span class="ty">Var</span>(<span class="ty">Text</span>, <a href="../src/svg.taut.html#L182"><span class="ty">Css</span></a>)
+<a class="ln" id="L57" href="#L57">57</a>  <span class="com">// Whether a press on the element (or inside it) that moves becomes a drag: the element then</span>
+<a class="ln" id="L58" href="#L58">58</a>  <span class="com">// holds the pointer and gets `DragStart`, `DragMove` and `DragEnd`, and the node it is let</span>
+<a class="ln" id="L59" href="#L59">59</a>  <span class="com">// go over gets `Drop`. Only the DOM renderer has drags.</span>
+<a class="ln" id="L60" href="#L60">60</a>  <span class="ty">DragSource</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L61" href="#L61">61</a>}
+<a class="ln" id="L62" href="#L62">62</a>
+<a class="ln" id="L63" href="#L63">63</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">web_vocab</span>(): <span class="ty">Vocab</span>(<a href="#L9"><span class="ty">HtmlKind</span></a>, <a href="#L37"><span class="ty">HtmlAttr</span></a>) {
+<a class="ln" id="L64" href="#L64">64</a>  <span class="ty">Vocab</span> {
+<a class="ln" id="L65" href="#L65">65</a>    column: <a href="#L10"><span class="ty">Tag</span></a>(<span class="str">&quot;div&quot;</span>),
+<a class="ln" id="L66" href="#L66">66</a>    row: <a href="#L10"><span class="ty">Tag</span></a>(<span class="str">&quot;div&quot;</span>),
+<a class="ln" id="L67" href="#L67">67</a>    pressable: <a href="#L10"><span class="ty">Tag</span></a>(<span class="str">&quot;button&quot;</span>),
+<a class="ln" id="L68" href="#L68">68</a>    input: <a href="#L10"><span class="ty">Tag</span></a>(<span class="str">&quot;input&quot;</span>),
+<a class="ln" id="L69" href="#L69">69</a>    role: (<span class="var">r</span>: <span class="ty">Role</span>) =&gt; <span class="kw">match</span> r {
+<a class="ln" id="L70" href="#L70">70</a>      <span class="ty">Button</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;button&quot;</span>, l)
+<a class="ln" id="L71" href="#L71">71</a>      <span class="ty">Link</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;link&quot;</span>, l)
+<a class="ln" id="L72" href="#L72">72</a>      <span class="ty">Checkbox</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;checkbox&quot;</span>, l)
+<a class="ln" id="L73" href="#L73">73</a>      <span class="ty">TextField</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;textbox&quot;</span>, l)
+<a class="ln" id="L74" href="#L74">74</a>      <span class="ty">Tab</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;tab&quot;</span>, l)
+<a class="ln" id="L75" href="#L75">75</a>      <span class="ty">MenuItem</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;menuitem&quot;</span>, l)
+<a class="ln" id="L76" href="#L76">76</a>      <span class="ty">Heading</span>(level) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;heading&quot;</span>, <span class="str">&quot;&quot;</span>)
+<a class="ln" id="L77" href="#L77">77</a>      <span class="ty">ListBox</span> =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;listbox&quot;</span>, <span class="str">&quot;&quot;</span>)
+<a class="ln" id="L78" href="#L78">78</a>      <span class="ty">ListEntry</span> =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;option&quot;</span>, <span class="str">&quot;&quot;</span>)
+<a class="ln" id="L79" href="#L79">79</a>      <span class="ty">Region</span>(l) =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;region&quot;</span>, l)
+<a class="ln" id="L80" href="#L80">80</a>      <span class="ty">Presentation</span> =&gt; <a href="#L40"><span class="ty">Aria</span></a>(<span class="str">&quot;presentation&quot;</span>, <span class="str">&quot;&quot;</span>)
+<a class="ln" id="L81" href="#L81">81</a>    },
+<a class="ln" id="L82" href="#L82">82</a>    name: (<span class="var">l</span>: <span class="ty">Text</span>) =&gt; <a href="#L38"><span class="ty">Attr</span></a>(<span class="str">&quot;aria-label&quot;</span>, l),
+<a class="ln" id="L83" href="#L83">83</a>    disabled: (<span class="var">b</span>: <span class="ty">Bool</span>) =&gt; <a href="#L43"><span class="ty">Disabled</span></a>(b),
+<a class="ln" id="L84" href="#L84">84</a>    value: (<span class="var">v</span>: <span class="ty">Text</span>) =&gt; <a href="#L42"><span class="ty">Value</span></a>(v)
+<a class="ln" id="L85" href="#L85">85</a>  }
+<a class="ln" id="L86" href="#L86">86</a>}
+<a class="ln" id="L87" href="#L87">87</a>
+<a class="ln" id="L88" href="#L88">88</a><span class="kw">fn</span> <span class="fn">digit</span>(<span class="var">d</span>: u64): <span class="ty">Text</span> ! {overflow} {
+<a class="ln" id="L89" href="#L89">89</a>  <span class="kw">match</span> <span class="fn">Text::slice</span>(<span class="str">&quot;0123456789&quot;</span>, d, d + <span class="num">1</span>) {
+<a class="ln" id="L90" href="#L90">90</a>    <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L91" href="#L91">91</a>    <span class="ty">None</span> =&gt; <span class="str">&quot;0&quot;</span>
+<a class="ln" id="L92" href="#L92">92</a>  }
+<a class="ln" id="L93" href="#L93">93</a>}
+<a class="ln" id="L94" href="#L94">94</a>
+<a class="ln" id="L95" href="#L95">95</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">decimal</span>(<span class="var">n</span>: u64): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L96" href="#L96">96</a>  <span class="kw">if</span> n &lt; <span class="num">10</span> { <a href="#L88"><span class="fn">digit</span></a>(n) } <span class="kw">else</span> { <span class="fn">concat</span>(<a href="#L95"><span class="fn">decimal</span></a>(<span class="fn">div</span>(n, <span class="num">10</span>)), <a href="#L88"><span class="fn">digit</span></a>(<span class="fn">mod</span>(n, <span class="num">10</span>))) }
+<a class="ln" id="L97" href="#L97">97</a>}
+<a class="ln" id="L98" href="#L98">98</a>
+<a class="ln" id="L99" href="#L99">99</a><span class="com">// ---- what may be written --------------------------------------------------------------------</span>
+<a class="ln" id="L100" href="#L100">100</a><span class="com">// Both renderers write only what `policy.taut` allows: a tag from its list of elements, an</span>
+<a class="ln" id="L101" href="#L101">101</a><span class="com">// attribute from its list of attributes, and a URL relative to the page or with the scheme</span>
+<a class="ln" id="L102" href="#L102">102</a><span class="com">// `http`, `https`, `mailto` or `tel`.</span>
+<a class="ln" id="L103" href="#L103">103</a>
+<a class="ln" id="L104" href="#L104">104</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">holds</span>(<span class="var">y</span>: <span class="ty">Bool</span>): <span class="ty">Bool</span> {
+<a class="ln" id="L105" href="#L105">105</a>  <span class="kw">match</span> y { <span class="kw">true</span> =&gt; <span class="kw">true</span>, <span class="kw">false</span> =&gt; <span class="kw">false</span> }
+<a class="ln" id="L106" href="#L106">106</a>}
+<a class="ln" id="L107" href="#L107">107</a>
+<a class="ln" id="L108" href="#L108">108</a><span class="com">// The bytes of `t`, as `policy.taut` reads them.</span>
+<a class="ln" id="L109" href="#L109">109</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">bytes_of</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">List</span>(<span class="ty">Nat</span>) ! {div, overflow} { <a href="#L111"><span class="fn">bytes_before</span></a>(t, <span class="fn">Text::len</span>(t), <span class="ty">Nil</span>) }
+<a class="ln" id="L110" href="#L110">110</a>
+<a class="ln" id="L111" href="#L111">111</a><span class="kw">fn</span> <span class="fn">bytes_before</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">i</span>: u64, <span class="var">acc</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">Nat</span>) ! {div, overflow} {
+<a class="ln" id="L112" href="#L112">112</a>  <span class="kw">if</span> i == <span class="num">0</span> { acc } <span class="kw">else</span> {
+<a class="ln" id="L113" href="#L113">113</a>    <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i - <span class="num">1</span>) {
+<a class="ln" id="L114" href="#L114">114</a>      <span class="ty">Some</span>(b) =&gt; <a href="#L111"><span class="fn">bytes_before</span></a>(t, i - <span class="num">1</span>, <span class="ty">Cons</span>(<span class="fn">Nat::of_u64</span>(<span class="fn">U64::of_u8</span>(b)), acc))
+<a class="ln" id="L115" href="#L115">115</a>      <span class="ty">None</span> =&gt; acc
+<a class="ln" id="L116" href="#L116">116</a>    }
+<a class="ln" id="L117" href="#L117">117</a>  }
+<a class="ln" id="L118" href="#L118">118</a>}
+<a class="ln" id="L119" href="#L119">119</a>
+<a class="ln" id="L120" href="#L120">120</a><span class="com">// Keep byte conversion tail recursive: a rendered document can have many more</span>
+<a class="ln" id="L121" href="#L121">121</a><span class="com">// bytes than the host stack can hold, even when its DOM tree is shallow.</span>
+<a class="ln" id="L122" href="#L122">122</a><span class="kw">fn</span> <span class="fn">reverse_u8s</span>(<span class="var">w</span>: <span class="ty">List</span>(u8), <span class="var">acc</span>: <span class="ty">List</span>(u8)): <span class="ty">List</span>(u8) ! {div, overflow} {
+<a class="ln" id="L123" href="#L123">123</a>  <span class="kw">match</span> w {
+<a class="ln" id="L124" href="#L124">124</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L125" href="#L125">125</a>    <span class="ty">Cons</span>(c, rest) =&gt; <a href="#L122"><span class="fn">reverse_u8s</span></a>(rest, <span class="ty">Cons</span>(c, acc))
+<a class="ln" id="L126" href="#L126">126</a>  }
+<a class="ln" id="L127" href="#L127">127</a>}
+<a class="ln" id="L128" href="#L128">128</a><span class="kw">fn</span> <span class="fn">u8s_before</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">acc</span>: <span class="ty">List</span>(u8)): <span class="ty">List</span>(u8) ! {div, overflow} {
+<a class="ln" id="L129" href="#L129">129</a>  <span class="kw">match</span> w {
+<a class="ln" id="L130" href="#L130">130</a>    <span class="ty">Nil</span> =&gt; <a href="#L122"><span class="fn">reverse_u8s</span></a>(acc, <span class="ty">Nil</span>)
+<a class="ln" id="L131" href="#L131">131</a>    <span class="ty">Cons</span>(c, rest) =&gt; <a href="#L128"><span class="fn">u8s_before</span></a>(rest, <span class="ty">Cons</span>(<span class="fn">U8::of_u64</span>(<span class="fn">U64::of_nat</span>(c)), acc))
+<a class="ln" id="L132" href="#L132">132</a>  }
+<a class="ln" id="L133" href="#L133">133</a>}
+<a class="ln" id="L134" href="#L134">134</a><span class="kw">fn</span> <span class="fn">u8s_of</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(u8) ! {div, overflow} { <a href="#L128"><span class="fn">u8s_before</span></a>(w, <span class="ty">Nil</span>) }
+<a class="ln" id="L135" href="#L135">135</a>
+<a class="ln" id="L136" href="#L136">136</a><span class="com">// The text of bytes that came from a text: &quot;&quot; if they are not UTF-8.</span>
+<a class="ln" id="L137" href="#L137">137</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">text_of_byte_list</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L138" href="#L138">138</a>  <span class="kw">match</span> <span class="fn">Text::of_utf8</span>(<a href="#L134"><span class="fn">u8s_of</span></a>(w)) {
+<a class="ln" id="L139" href="#L139">139</a>    <span class="ty">Some</span>(t) =&gt; t
+<a class="ln" id="L140" href="#L140">140</a>    <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L141" href="#L141">141</a>  }
+<a class="ln" id="L142" href="#L142">142</a>}
+<a class="ln" id="L143" href="#L143">143</a>
+<a class="ln" id="L144" href="#L144">144</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tag_ok</span>(<span class="var">tag</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div, overflow} { <a href="#L104"><span class="fn">holds</span></a>(<a href="../src/policy.taut.html#L178"><span class="fn">tag_allowed</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(tag))) }
+<a class="ln" id="L145" href="#L145">145</a>
+<a class="ln" id="L146" href="#L146">146</a><span class="kw">fn</span> <span class="fn">tag_is_void</span>(<span class="var">tag</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div, overflow} { <a href="#L104"><span class="fn">holds</span></a>(<a href="../src/policy.taut.html#L197"><span class="fn">tag_void</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(tag))) }
+<a class="ln" id="L147" href="#L147">147</a>
+<a class="ln" id="L148" href="#L148">148</a><span class="kw">pub</span> <span class="kw">module</span> <span class="ty">Attr</span> {
+<a class="ln" id="L149" href="#L149">149</a>  <span class="kw">fn</span> <span class="fn">ok</span>(<span class="var">name</span>: <span class="ty">Text</span>, <span class="var">value</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div, overflow} {
+<a class="ln" id="L150" href="#L150">150</a>    <a href="#L104"><span class="fn">holds</span></a>(<a href="../src/policy.taut.html#L334"><span class="fn">Attr::value_allowed</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(name), <a href="#L109"><span class="fn">bytes_of</span></a>(value)))
+<a class="ln" id="L151" href="#L151">151</a>  }
+<a class="ln" id="L152" href="#L152">152</a>
+<a class="ln" id="L153" href="#L153">153</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">refusal</span>(<span class="var">name</span>: <span class="ty">Text</span>): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L154" href="#L154">154</a>    <span class="kw">if</span> <a href="#L178"><span class="fn">starts_with</span></a>(name, <span class="str">&quot;on&quot;</span>) { <span class="str">&quot;a handler is an `on:` event, not an `on…` attribute&quot;</span> } <span class="kw">else</span> {
+<a class="ln" id="L155" href="#L155">155</a>      <span class="fn">concat</span>(
+<a class="ln" id="L156" href="#L156">156</a>        <span class="fn">concat</span>(<span class="str">&quot;`&quot;</span>, name),
+<a class="ln" id="L157" href="#L157">157</a>        <span class="str">&quot;` is not an attribute delim writes: it may run code, or it is not one of HTML&quot;</span>
+<a class="ln" id="L158" href="#L158">158</a>      )
+<a class="ln" id="L159" href="#L159">159</a>    }
+<a class="ln" id="L160" href="#L160">160</a>  }
+<a class="ln" id="L161" href="#L161">161</a>
+<a class="ln" id="L162" href="#L162">162</a>  <span class="com">// Why the attribute `name` may not be written, if it may not.</span>
+<a class="ln" id="L163" href="#L163">163</a>  <span class="kw">fn</span> <span class="fn">name_refused</span>(<span class="var">name</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {div, overflow} {
+<a class="ln" id="L164" href="#L164">164</a>    <span class="kw">if</span> <a href="#L104"><span class="fn">holds</span></a>(<a href="../src/policy.taut.html#L318"><span class="fn">Attr::allowed</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(name))) { <span class="ty">None</span> } <span class="kw">else</span> { <span class="ty">Some</span>(<a href="#L153"><span class="fn">Attr::refusal</span></a>(name)) }
+<a class="ln" id="L165" href="#L165">165</a>  }
+<a class="ln" id="L166" href="#L166">166</a>
+<a class="ln" id="L167" href="#L167">167</a>  <span class="com">// Why `name=&quot;value&quot;` may not be written, if it may not.</span>
+<a class="ln" id="L168" href="#L168">168</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">refused</span>(<span class="var">name</span>: <span class="ty">Text</span>, <span class="var">value</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {div, overflow} {
+<a class="ln" id="L169" href="#L169">169</a>    <span class="kw">if</span> <span class="fn">Attr::ok</span>(name, value) { <span class="ty">None</span> } <span class="kw">else</span> {
+<a class="ln" id="L170" href="#L170">170</a>      <span class="kw">match</span> <span class="fn">Attr::name_refused</span>(name) {
+<a class="ln" id="L171" href="#L171">171</a>        <span class="ty">Some</span>(why) =&gt; <span class="ty">Some</span>(why)
+<a class="ln" id="L172" href="#L172">172</a>        <span class="ty">None</span> =&gt; <span class="ty">Some</span>(<a href="#L193"><span class="fn">url_refusal</span></a>())
+<a class="ln" id="L173" href="#L173">173</a>      }
+<a class="ln" id="L174" href="#L174">174</a>    }
+<a class="ln" id="L175" href="#L175">175</a>  }
+<a class="ln" id="L176" href="#L176">176</a>}
+<a class="ln" id="L177" href="#L177">177</a>
+<a class="ln" id="L178" href="#L178">178</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">starts_with</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">prefix</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div, overflow} {
+<a class="ln" id="L179" href="#L179">179</a>  <span class="kw">match</span> <span class="fn">Text::slice</span>(t, <span class="num">0</span>, <span class="fn">Text::len</span>(prefix)) {
+<a class="ln" id="L180" href="#L180">180</a>    <span class="ty">Some</span>(head) =&gt; head == prefix
+<a class="ln" id="L181" href="#L181">181</a>    <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L182" href="#L182">182</a>  }
+<a class="ln" id="L183" href="#L183">183</a>}
+<a class="ln" id="L184" href="#L184">184</a>
+<a class="ln" id="L185" href="#L185">185</a><span class="com">// What the renderers and `view!` say about a refused tag, attribute and URL.</span>
+<a class="ln" id="L186" href="#L186">186</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tag_refusal</span>(<span class="var">tag</span>: <span class="ty">Text</span>): <span class="ty">Text</span> {
+<a class="ln" id="L187" href="#L187">187</a>  <span class="fn">concat</span>(
+<a class="ln" id="L188" href="#L188">188</a>    <span class="fn">concat</span>(<span class="str">&quot;`&quot;</span>, tag),
+<a class="ln" id="L189" href="#L189">189</a>    <span class="str">&quot;` is not an element delim writes: it may run code, or it is not one of HTML&quot;</span>
+<a class="ln" id="L190" href="#L190">190</a>  )
+<a class="ln" id="L191" href="#L191">191</a>}
+<a class="ln" id="L192" href="#L192">192</a>
+<a class="ln" id="L193" href="#L193">193</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">url_refusal</span>(): <span class="ty">Text</span> {
+<a class="ln" id="L194" href="#L194">194</a>  <span class="str">&quot;a URL is written only relative to the page or with `http:`, `https:`, `mailto:` or `tel:`, and with no `&amp;`, `&lt;`, `&gt;` or `\&quot;` before its path&quot;</span>
+<a class="ln" id="L195" href="#L195">195</a>}
+<a class="ln" id="L196" href="#L196">196</a>
+<a class="ln" id="L197" href="#L197">197</a><span class="com">// Why the tag `tag` may not be written, if it may not.</span>
+<a class="ln" id="L198" href="#L198">198</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tag_refused</span>(<span class="var">tag</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {div, overflow} {
+<a class="ln" id="L199" href="#L199">199</a>  <span class="kw">if</span> <a href="#L144"><span class="fn">tag_ok</span></a>(tag) { <span class="ty">None</span> } <span class="kw">else</span> { <span class="ty">Some</span>(<a href="#L186"><span class="fn">tag_refusal</span></a>(tag)) }
+<a class="ln" id="L200" href="#L200">200</a>}
+<a class="ln" id="L201" href="#L201">201</a>
+<a class="ln" id="L202" href="#L202">202</a><span class="com">// The tag written for `tag`: itself, or, when it is refused, an element that shows nothing.</span>
+<a class="ln" id="L203" href="#L203">203</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">written_tag</span>(<span class="var">tag</span>: <span class="ty">Text</span>): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L204" href="#L204">204</a>  <span class="kw">if</span> <a href="#L144"><span class="fn">tag_ok</span></a>(tag) { tag } <span class="kw">else</span> { <span class="str">&quot;delim-refused&quot;</span> }
+<a class="ln" id="L205" href="#L205">205</a>}
+<a class="ln" id="L206" href="#L206">206</a>
+<a class="ln" id="L207" href="#L207">207</a><span class="com">// Whether `value` of a URL attribute may be written.</span>
+<a class="ln" id="L208" href="#L208">208</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">url_ok</span>(<span class="var">value</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div, overflow} { <a href="#L104"><span class="fn">holds</span></a>(<a href="../src/policy.taut.html#L425"><span class="fn">url_allowed</span></a>(<a href="#L109"><span class="fn">bytes_of</span></a>(value))) }
+</code></pre>
+</html>

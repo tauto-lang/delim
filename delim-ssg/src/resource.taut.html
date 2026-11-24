@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/resource.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/resource.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;codec.taut&quot;</span> { <span class="ty">Codec</span> }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/tree.taut&quot;</span> { <span class="ty">Tree</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/signal.taut&quot;</span> { <span class="ty">Load</span>, get, memo, rt }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/resource.taut&quot;</span> { resource }
+<a class="ln" id="L5" href="#L5">5</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/handle.taut&quot;</span> { <span class="ty">Resource</span>, <span class="ty">ResourceState</span>, resource_handle }
+<a class="ln" id="L6" href="#L6">6</a>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// The data a page reads while it is written: a key the view asks for, and how its value is</span>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// written as text.</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="kw">pub(open)</span> <span class="kw">struct</span> <span class="ty">Res</span>(<span class="ty">B</span>: <span class="ty">Type</span>) { key: <span class="ty">Text</span>, value: <a href="../src/codec.taut.html#L5"><span class="ty">Codec</span></a>(<span class="ty">B</span>) }
+<a class="ln" id="L10" href="#L10">10</a>
+<a class="ln" id="L11" href="#L11">11</a><span class="com">// What `generate` runs for a key, with the value's type erased by the codec. It may perform</span>
+<a class="ln" id="L12" href="#L12">12</a><span class="com">// the effects `e` besides `Div`, such as reading files.</span>
+<a class="ln" id="L13" href="#L13">13</a><span class="kw">pub</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Answer</span>(!e) { name: <span class="ty">Text</span>, run: () -&gt; <span class="ty">Result</span>(<span class="ty">Text</span>, <span class="ty">Text</span>) ! {overflow, div} ∪ e }
+<a class="ln" id="L14" href="#L14">14</a>
+<a class="ln" id="L15" href="#L15">15</a><span class="com">// The loader of `r`. An `Err` stops `generate`, with its reason.</span>
+<a class="ln" id="L16" href="#L16">16</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">loading</span>&lt;<span class="ty">B</span>: <span class="ty">Shared</span>, !e&gt;(
+<a class="ln" id="L17" href="#L17">17</a>  <span class="var">r</span>: <a href="#L9"><span class="ty">Res</span></a>(<span class="ty">B</span>),
+<a class="ln" id="L18" href="#L18">18</a>  <span class="var">run</span>: () -&gt; <span class="ty">Result</span>(<span class="ty">B</span>, <span class="ty">Text</span>) ! {overflow, div} ∪ e
+<a class="ln" id="L19" href="#L19">19</a>): <a href="#L13"><span class="ty">Answer</span></a>(!e) {
+<a class="ln" id="L20" href="#L20">20</a>  <span class="ty">Answer</span> {
+<a class="ln" id="L21" href="#L21">21</a>    name: r.key,
+<a class="ln" id="L22" href="#L22">22</a>    run: () =&gt; <span class="kw">match</span> <span class="fn">run</span>() {
+<a class="ln" id="L23" href="#L23">23</a>      <span class="ty">Ok</span>(b) =&gt; <span class="ty">Ok</span>((r.value.encode)(b))
+<a class="ln" id="L24" href="#L24">24</a>      <span class="ty">Err</span>(why) =&gt; <span class="ty">Err</span>(why)
+<a class="ln" id="L25" href="#L25">25</a>    }
+<a class="ln" id="L26" href="#L26">26</a>  }
+<a class="ln" id="L27" href="#L27">27</a>}
+<a class="ln" id="L28" href="#L28">28</a>
+<a class="ln" id="L29" href="#L29">29</a><span class="com">// Runs the loader named `name`; a name no loader has is refused.</span>
+<a class="ln" id="L30" href="#L30">30</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">load</span>&lt;!e&gt;(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L13"><span class="ty">Answer</span></a>(!e)), <span class="var">name</span>: <span class="ty">Text</span>): <span class="ty">Result</span>(<span class="ty">Text</span>, <span class="ty">Text</span>) ! {overflow, div} ∪ e {
+<a class="ln" id="L31" href="#L31">31</a>  <span class="kw">match</span> l {
+<a class="ln" id="L32" href="#L32">32</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Err</span>(<span class="str">&quot;no resource has this key&quot;</span>)
+<a class="ln" id="L33" href="#L33">33</a>    <span class="ty">Cons</span>(a, rest) =&gt; <span class="kw">if</span> a.name == name { (a.run)() } <span class="kw">else</span> { <a href="#L30"><span class="fn">load</span></a>(rest, name) }
+<a class="ln" id="L34" href="#L34">34</a>  }
+<a class="ln" id="L35" href="#L35">35</a>}
+<a class="ln" id="L36" href="#L36">36</a>
+<a class="ln" id="L37" href="#L37">37</a><span class="com">// The value of `r` in the page being written on `t`: pending until `generate` has loaded it,</span>
+<a class="ln" id="L38" href="#L38">38</a><span class="com">// then the decoded value. A value that does not decode is a failure.</span>
+<a class="ln" id="L39" href="#L39">39</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">use_res_in_tree</span>&lt;<span class="ty">K</span>: <span class="ty">Shared</span>, <span class="ty">P</span>: <span class="ty">Shared</span>, <span class="ty">B</span>: <span class="ty">Shared</span>&gt;(
+<a class="ln" id="L40" href="#L40">40</a>  <span class="var">t</span>: <span class="ty">Tree</span>(<span class="ty">K</span>, <span class="ty">P</span>),
+<a class="ln" id="L41" href="#L41">41</a>  <span class="var">r</span>: <a href="#L9"><span class="ty">Res</span></a>(<span class="ty">B</span>)
+<a class="ln" id="L42" href="#L42">42</a>): <span class="ty">Resource</span>(<span class="ty">B</span>, <span class="ty">Text</span>) ! {rt, div} {
+<a class="ln" id="L43" href="#L43">43</a>  <span class="kw">let</span> source := <span class="fn">resource</span>(t, r.key)
+<a class="ln" id="L44" href="#L44">44</a>  <span class="fn">resource_handle</span>(<span class="fn">memo</span>(() =&gt; <span class="kw">match</span> <span class="fn">get</span>(source) {
+<a class="ln" id="L45" href="#L45">45</a>    <span class="ty">Loading</span> =&gt; <span class="ty">Pending</span>
+<a class="ln" id="L46" href="#L46">46</a>    <span class="ty">Loaded</span>(value) =&gt; <span class="kw">match</span> (r.value.decode)(value) {
+<a class="ln" id="L47" href="#L47">47</a>      <span class="ty">Some</span>(b) =&gt; <span class="ty">Ready</span>(b)
+<a class="ln" id="L48" href="#L48">48</a>      <span class="ty">None</span> =&gt; <span class="ty">Failed</span>(<span class="fn">concat</span>(r.key, <span class="str">&quot;: the value does not decode&quot;</span>))
+<a class="ln" id="L49" href="#L49">49</a>    }
+<a class="ln" id="L50" href="#L50">50</a>    <span class="ty">LoadFailed</span>(why) =&gt; <span class="ty">Failed</span>(why)
+<a class="ln" id="L51" href="#L51">51</a>  }))
+<a class="ln" id="L52" href="#L52">52</a>}
+</code></pre>
+</html>

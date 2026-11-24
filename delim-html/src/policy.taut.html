@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/policy.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/policy.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::base { <span class="ty">Nat</span> }
+<a class="ln" id="L2" href="#L2">2</a>
+<a class="ln" id="L3" href="#L3">3</a><span class="com">// What the renderers may write, decided on the bytes so that the kernel reads it. Names are</span>
+<a class="ln" id="L4" href="#L4">4</a><span class="com">// lists of byte values, with the name in a comment: the file does not import `std::text`,</span>
+<a class="ln" id="L5" href="#L5">5</a><span class="com">// whose names would meet the prelude's in every file that imports this one: a tag name</span>
+<a class="ln" id="L6" href="#L6">6</a><span class="com">// from a list of elements that run no code, an attribute name from a list of attributes that</span>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// run none, and a URL whose scheme is one that loads a page or an address. Anything else is</span>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// refused. The lists name what is allowed, so an element or attribute a browser adds later</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="com">// is refused until it is added here.</span>
+<a class="ln" id="L10" href="#L10">10</a>
+<a class="ln" id="L11" href="#L11">11</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">same_bytes</span>(<span class="var">a</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">b</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L12" href="#L12">12</a>  <span class="kw">match</span> a {
+<a class="ln" id="L13" href="#L13">13</a>    <span class="ty">Nil</span> =&gt; ⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> b {
+<a class="ln" id="L14" href="#L14">14</a>      <span class="ty">Nil</span> =&gt; <span class="kw">true</span>
+<a class="ln" id="L15" href="#L15">15</a>      <span class="ty">Cons</span>(y, ys) =&gt; <span class="kw">false</span>
+<a class="ln" id="L16" href="#L16">16</a>    }
+<a class="ln" id="L17" href="#L17">17</a>    <span class="ty">Cons</span>(x, xs) =&gt; ⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> b {
+<a class="ln" id="L18" href="#L18">18</a>      <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L19" href="#L19">19</a>      <span class="ty">Cons</span>(y, ys) =&gt; <span class="fn">Bool::and</span>(<span class="fn">Nat::eq</span>(x, y), <a href="#L11"><span class="fn">same_bytes</span></a>(xs, ys))
+<a class="ln" id="L20" href="#L20">20</a>    }
+<a class="ln" id="L21" href="#L21">21</a>  }
+<a class="ln" id="L22" href="#L22">22</a>}
+<a class="ln" id="L23" href="#L23">23</a>
+<a class="ln" id="L24" href="#L24">24</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">begins_with</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L25" href="#L25">25</a>  <span class="kw">match</span> p {
+<a class="ln" id="L26" href="#L26">26</a>    <span class="ty">Nil</span> =&gt; <span class="kw">true</span>
+<a class="ln" id="L27" href="#L27">27</a>    <span class="ty">Cons</span>(y, ys) =&gt; ⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> w {
+<a class="ln" id="L28" href="#L28">28</a>      <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L29" href="#L29">29</a>      <span class="ty">Cons</span>(x, xs) =&gt; <span class="fn">Bool::and</span>(<span class="fn">Nat::eq</span>(x, y), <a href="#L24"><span class="fn">begins_with</span></a>(xs, ys))
+<a class="ln" id="L30" href="#L30">30</a>    }
+<a class="ln" id="L31" href="#L31">31</a>  }
+<a class="ln" id="L32" href="#L32">32</a>}
+<a class="ln" id="L33" href="#L33">33</a>
+<a class="ln" id="L34" href="#L34">34</a><span class="kw">fn</span> <span class="fn">one_of</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>))): <span class="ty">Bool</span> {
+<a class="ln" id="L35" href="#L35">35</a>  <span class="kw">match</span> l {
+<a class="ln" id="L36" href="#L36">36</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L37" href="#L37">37</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="fn">Bool::or</span>(<a href="#L11"><span class="fn">same_bytes</span></a>(w, t), <a href="#L34"><span class="fn">one_of</span></a>(w, rest))
+<a class="ln" id="L38" href="#L38">38</a>  }
+<a class="ln" id="L39" href="#L39">39</a>}
+<a class="ln" id="L40" href="#L40">40</a>
+<a class="ln" id="L41" href="#L41">41</a><span class="kw">fn</span> <span class="fn">has_byte</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">c</span>: <span class="ty">Nat</span>): <span class="ty">Bool</span> {
+<a class="ln" id="L42" href="#L42">42</a>  <span class="kw">match</span> w {
+<a class="ln" id="L43" href="#L43">43</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L44" href="#L44">44</a>    <span class="ty">Cons</span>(x, rest) =&gt; <span class="fn">Bool::or</span>(<span class="fn">Nat::eq</span>(x, c), <a href="#L41"><span class="fn">has_byte</span></a>(rest, c))
+<a class="ln" id="L45" href="#L45">45</a>  }
+<a class="ln" id="L46" href="#L46">46</a>}
+<a class="ln" id="L47" href="#L47">47</a>
+<a class="ln" id="L48" href="#L48">48</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">is_lower</span>(<span class="var">c</span>: <span class="ty">Nat</span>): <span class="ty">Bool</span> { <span class="fn">Bool::and</span>(<span class="fn">Nat::le</span>(<span class="num">97</span>, c), <span class="fn">Nat::le</span>(c, <span class="num">122</span>)) }
+<a class="ln" id="L49" href="#L49">49</a>
+<a class="ln" id="L50" href="#L50">50</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">is_digit_byte</span>(<span class="var">c</span>: <span class="ty">Nat</span>): <span class="ty">Bool</span> { <span class="fn">Bool::and</span>(<span class="fn">Nat::le</span>(<span class="num">48</span>, c), <span class="fn">Nat::le</span>(c, <span class="num">57</span>)) }
+<a class="ln" id="L51" href="#L51">51</a>
+<a class="ln" id="L52" href="#L52">52</a><span class="com">// The bytes after the first of a name: lowercase letters, digits and `-`.</span>
+<a class="ln" id="L53" href="#L53">53</a><span class="kw">fn</span> <span class="fn">name_rest_ok</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L54" href="#L54">54</a>  <span class="kw">match</span> w {
+<a class="ln" id="L55" href="#L55">55</a>    <span class="ty">Nil</span> =&gt; <span class="kw">true</span>
+<a class="ln" id="L56" href="#L56">56</a>    <span class="ty">Cons</span>(c, rest) =&gt; <span class="fn">Bool::and</span>(
+<a class="ln" id="L57" href="#L57">57</a>      <span class="fn">Bool::or</span>(<a href="#L48"><span class="fn">is_lower</span></a>(c), <span class="fn">Bool::or</span>(<a href="#L50"><span class="fn">is_digit_byte</span></a>(c), <span class="fn">Nat::eq</span>(c, <span class="num">45</span>))),
+<a class="ln" id="L58" href="#L58">58</a>      <a href="#L53"><span class="fn">name_rest_ok</span></a>(rest)
+<a class="ln" id="L59" href="#L59">59</a>    )
+<a class="ln" id="L60" href="#L60">60</a>  }
+<a class="ln" id="L61" href="#L61">61</a>}
+<a class="ln" id="L62" href="#L62">62</a>
+<a class="ln" id="L63" href="#L63">63</a><span class="com">// A name of a tag or an attribute: a lowercase letter, then lowercase letters, digits and `-`.</span>
+<a class="ln" id="L64" href="#L64">64</a><span class="kw">fn</span> <span class="fn">name_ok</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L65" href="#L65">65</a>  <span class="kw">match</span> w {
+<a class="ln" id="L66" href="#L66">66</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L67" href="#L67">67</a>    <span class="ty">Cons</span>(c, rest) =&gt; <span class="fn">Bool::and</span>(<a href="#L48"><span class="fn">is_lower</span></a>(c), <a href="#L53"><span class="fn">name_rest_ok</span></a>(rest))
+<a class="ln" id="L68" href="#L68">68</a>  }
+<a class="ln" id="L69" href="#L69">69</a>}
+<a class="ln" id="L70" href="#L70">70</a>
+<a class="ln" id="L71" href="#L71">71</a><span class="com">// ---- tags -------------------------------------------------------------------------------------</span>
+<a class="ln" id="L72" href="#L72">72</a>
+<a class="ln" id="L73" href="#L73">73</a><span class="com">// Elements of HTML that run no code and do not change how the text after them is read. Left out:</span>
+<a class="ln" id="L74" href="#L74">74</a><span class="com">// `script`, `style`, `iframe`, `frame`, `object`, `embed`, `base`, `link`, `meta`, `template`,</span>
+<a class="ln" id="L75" href="#L75">75</a><span class="com">// `noscript`, `svg`, `math` and the elements that only belong in `&lt;head&gt;`.</span>
+<a class="ln" id="L76" href="#L76">76</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tags</span>(): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) {
+<a class="ln" id="L77" href="#L77">77</a>  [
+<a class="ln" id="L78" href="#L78">78</a>    [<span class="num">97</span>], <span class="com">// a</span>
+<a class="ln" id="L79" href="#L79">79</a>    [<span class="num">97</span>, <span class="num">98</span>, <span class="num">98</span>, <span class="num">114</span>], <span class="com">// abbr</span>
+<a class="ln" id="L80" href="#L80">80</a>    [<span class="num">97</span>, <span class="num">100</span>, <span class="num">100</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">115</span>, <span class="num">115</span>], <span class="com">// address</span>
+<a class="ln" id="L81" href="#L81">81</a>    [<span class="num">97</span>, <span class="num">114</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">99</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// article</span>
+<a class="ln" id="L82" href="#L82">82</a>    [<span class="num">97</span>, <span class="num">115</span>, <span class="num">105</span>, <span class="num">100</span>, <span class="num">101</span>], <span class="com">// aside</span>
+<a class="ln" id="L83" href="#L83">83</a>    [<span class="num">97</span>, <span class="num">117</span>, <span class="num">100</span>, <span class="num">105</span>, <span class="num">111</span>], <span class="com">// audio</span>
+<a class="ln" id="L84" href="#L84">84</a>    [<span class="num">98</span>], <span class="com">// b</span>
+<a class="ln" id="L85" href="#L85">85</a>    [<span class="num">98</span>, <span class="num">100</span>, <span class="num">105</span>], <span class="com">// bdi</span>
+<a class="ln" id="L86" href="#L86">86</a>    [<span class="num">98</span>, <span class="num">100</span>, <span class="num">111</span>], <span class="com">// bdo</span>
+<a class="ln" id="L87" href="#L87">87</a>    [<span class="num">98</span>, <span class="num">108</span>, <span class="num">111</span>, <span class="num">99</span>, <span class="num">107</span>, <span class="num">113</span>, <span class="num">117</span>, <span class="num">111</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// blockquote</span>
+<a class="ln" id="L88" href="#L88">88</a>    [<span class="num">98</span>, <span class="num">114</span>], <span class="com">// br</span>
+<a class="ln" id="L89" href="#L89">89</a>    [<span class="num">98</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">116</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// button</span>
+<a class="ln" id="L90" href="#L90">90</a>    [<span class="num">99</span>, <span class="num">97</span>, <span class="num">110</span>, <span class="num">118</span>, <span class="num">97</span>, <span class="num">115</span>], <span class="com">// canvas</span>
+<a class="ln" id="L91" href="#L91">91</a>    [<span class="num">99</span>, <span class="num">97</span>, <span class="num">112</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// caption</span>
+<a class="ln" id="L92" href="#L92">92</a>    [<span class="num">99</span>, <span class="num">105</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// cite</span>
+<a class="ln" id="L93" href="#L93">93</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">100</span>, <span class="num">101</span>], <span class="com">// code</span>
+<a class="ln" id="L94" href="#L94">94</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">108</span>], <span class="com">// col</span>
+<a class="ln" id="L95" href="#L95">95</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">108</span>, <span class="num">103</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">117</span>, <span class="num">112</span>], <span class="com">// colgroup</span>
+<a class="ln" id="L96" href="#L96">96</a>    [<span class="num">100</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">97</span>], <span class="com">// data</span>
+<a class="ln" id="L97" href="#L97">97</a>    [<span class="num">100</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">105</span>, <span class="num">115</span>, <span class="num">116</span>], <span class="com">// datalist</span>
+<a class="ln" id="L98" href="#L98">98</a>    [<span class="num">100</span>, <span class="num">100</span>], <span class="com">// dd</span>
+<a class="ln" id="L99" href="#L99">99</a>    [<span class="num">100</span>, <span class="num">101</span>, <span class="num">108</span>], <span class="com">// del</span>
+<a class="ln" id="L100" href="#L100">100</a>    [<span class="num">100</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">105</span>, <span class="num">108</span>, <span class="num">115</span>], <span class="com">// details</span>
+<a class="ln" id="L101" href="#L101">101</a>    [<span class="num">100</span>, <span class="num">102</span>, <span class="num">110</span>], <span class="com">// dfn</span>
+<a class="ln" id="L102" href="#L102">102</a>    [<span class="num">100</span>, <span class="num">105</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">111</span>, <span class="num">103</span>], <span class="com">// dialog</span>
+<a class="ln" id="L103" href="#L103">103</a>    [<span class="num">100</span>, <span class="num">105</span>, <span class="num">118</span>], <span class="com">// div</span>
+<a class="ln" id="L104" href="#L104">104</a>    [<span class="num">100</span>, <span class="num">108</span>], <span class="com">// dl</span>
+<a class="ln" id="L105" href="#L105">105</a>    [<span class="num">100</span>, <span class="num">116</span>], <span class="com">// dt</span>
+<a class="ln" id="L106" href="#L106">106</a>    [<span class="num">101</span>, <span class="num">109</span>], <span class="com">// em</span>
+<a class="ln" id="L107" href="#L107">107</a>    [<span class="num">102</span>, <span class="num">105</span>, <span class="num">101</span>, <span class="num">108</span>, <span class="num">100</span>, <span class="num">115</span>, <span class="num">101</span>, <span class="num">116</span>], <span class="com">// fieldset</span>
+<a class="ln" id="L108" href="#L108">108</a>    [<span class="num">102</span>, <span class="num">105</span>, <span class="num">103</span>, <span class="num">99</span>, <span class="num">97</span>, <span class="num">112</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// figcaption</span>
+<a class="ln" id="L109" href="#L109">109</a>    [<span class="num">102</span>, <span class="num">105</span>, <span class="num">103</span>, <span class="num">117</span>, <span class="num">114</span>, <span class="num">101</span>], <span class="com">// figure</span>
+<a class="ln" id="L110" href="#L110">110</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">111</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// footer</span>
+<a class="ln" id="L111" href="#L111">111</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>], <span class="com">// form</span>
+<a class="ln" id="L112" href="#L112">112</a>    [<span class="num">104</span>, <span class="num">49</span>], <span class="com">// h1</span>
+<a class="ln" id="L113" href="#L113">113</a>    [<span class="num">104</span>, <span class="num">50</span>], <span class="com">// h2</span>
+<a class="ln" id="L114" href="#L114">114</a>    [<span class="num">104</span>, <span class="num">51</span>], <span class="com">// h3</span>
+<a class="ln" id="L115" href="#L115">115</a>    [<span class="num">104</span>, <span class="num">52</span>], <span class="com">// h4</span>
+<a class="ln" id="L116" href="#L116">116</a>    [<span class="num">104</span>, <span class="num">53</span>], <span class="com">// h5</span>
+<a class="ln" id="L117" href="#L117">117</a>    [<span class="num">104</span>, <span class="num">54</span>], <span class="com">// h6</span>
+<a class="ln" id="L118" href="#L118">118</a>    [<span class="num">104</span>, <span class="num">101</span>, <span class="num">97</span>, <span class="num">100</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// header</span>
+<a class="ln" id="L119" href="#L119">119</a>    [<span class="num">104</span>, <span class="num">103</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">117</span>, <span class="num">112</span>], <span class="com">// hgroup</span>
+<a class="ln" id="L120" href="#L120">120</a>    [<span class="num">104</span>, <span class="num">114</span>], <span class="com">// hr</span>
+<a class="ln" id="L121" href="#L121">121</a>    [<span class="num">105</span>], <span class="com">// i</span>
+<a class="ln" id="L122" href="#L122">122</a>    [<span class="num">105</span>, <span class="num">109</span>, <span class="num">103</span>], <span class="com">// img</span>
+<a class="ln" id="L123" href="#L123">123</a>    [<span class="num">105</span>, <span class="num">110</span>, <span class="num">112</span>, <span class="num">117</span>, <span class="num">116</span>], <span class="com">// input</span>
+<a class="ln" id="L124" href="#L124">124</a>    [<span class="num">105</span>, <span class="num">110</span>, <span class="num">115</span>], <span class="com">// ins</span>
+<a class="ln" id="L125" href="#L125">125</a>    [<span class="num">107</span>, <span class="num">98</span>, <span class="num">100</span>], <span class="com">// kbd</span>
+<a class="ln" id="L126" href="#L126">126</a>    [<span class="num">108</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">101</span>, <span class="num">108</span>], <span class="com">// label</span>
+<a class="ln" id="L127" href="#L127">127</a>    [<span class="num">108</span>, <span class="num">101</span>, <span class="num">103</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">100</span>], <span class="com">// legend</span>
+<a class="ln" id="L128" href="#L128">128</a>    [<span class="num">108</span>, <span class="num">105</span>], <span class="com">// li</span>
+<a class="ln" id="L129" href="#L129">129</a>    [<span class="num">109</span>, <span class="num">97</span>, <span class="num">105</span>, <span class="num">110</span>], <span class="com">// main</span>
+<a class="ln" id="L130" href="#L130">130</a>    [<span class="num">109</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">107</span>], <span class="com">// mark</span>
+<a class="ln" id="L131" href="#L131">131</a>    [<span class="num">109</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">117</span>], <span class="com">// menu</span>
+<a class="ln" id="L132" href="#L132">132</a>    [<span class="num">109</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// meter</span>
+<a class="ln" id="L133" href="#L133">133</a>    [<span class="num">110</span>, <span class="num">97</span>, <span class="num">118</span>], <span class="com">// nav</span>
+<a class="ln" id="L134" href="#L134">134</a>    [<span class="num">111</span>, <span class="num">108</span>], <span class="com">// ol</span>
+<a class="ln" id="L135" href="#L135">135</a>    [<span class="num">111</span>, <span class="num">112</span>, <span class="num">116</span>, <span class="num">103</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">117</span>, <span class="num">112</span>], <span class="com">// optgroup</span>
+<a class="ln" id="L136" href="#L136">136</a>    [<span class="num">111</span>, <span class="num">112</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// option</span>
+<a class="ln" id="L137" href="#L137">137</a>    [<span class="num">111</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">112</span>, <span class="num">117</span>, <span class="num">116</span>], <span class="com">// output</span>
+<a class="ln" id="L138" href="#L138">138</a>    [<span class="num">112</span>], <span class="com">// p</span>
+<a class="ln" id="L139" href="#L139">139</a>    [<span class="num">112</span>, <span class="num">105</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">117</span>, <span class="num">114</span>, <span class="num">101</span>], <span class="com">// picture</span>
+<a class="ln" id="L140" href="#L140">140</a>    [<span class="num">112</span>, <span class="num">114</span>, <span class="num">101</span>], <span class="com">// pre</span>
+<a class="ln" id="L141" href="#L141">141</a>    [<span class="num">112</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">103</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">115</span>, <span class="num">115</span>], <span class="com">// progress</span>
+<a class="ln" id="L142" href="#L142">142</a>    [<span class="num">113</span>], <span class="com">// q</span>
+<a class="ln" id="L143" href="#L143">143</a>    [<span class="num">114</span>, <span class="num">112</span>], <span class="com">// rp</span>
+<a class="ln" id="L144" href="#L144">144</a>    [<span class="num">114</span>, <span class="num">116</span>], <span class="com">// rt</span>
+<a class="ln" id="L145" href="#L145">145</a>    [<span class="num">114</span>, <span class="num">117</span>, <span class="num">98</span>, <span class="num">121</span>], <span class="com">// ruby</span>
+<a class="ln" id="L146" href="#L146">146</a>    [<span class="num">115</span>], <span class="com">// s</span>
+<a class="ln" id="L147" href="#L147">147</a>    [<span class="num">115</span>, <span class="num">97</span>, <span class="num">109</span>, <span class="num">112</span>], <span class="com">// samp</span>
+<a class="ln" id="L148" href="#L148">148</a>    [<span class="num">115</span>, <span class="num">101</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">99</span>, <span class="num">104</span>], <span class="com">// search</span>
+<a class="ln" id="L149" href="#L149">149</a>    [<span class="num">115</span>, <span class="num">101</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// section</span>
+<a class="ln" id="L150" href="#L150">150</a>    [<span class="num">115</span>, <span class="num">101</span>, <span class="num">108</span>, <span class="num">101</span>, <span class="num">99</span>, <span class="num">116</span>], <span class="com">// select</span>
+<a class="ln" id="L151" href="#L151">151</a>    [<span class="num">115</span>, <span class="num">109</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">108</span>], <span class="com">// small</span>
+<a class="ln" id="L152" href="#L152">152</a>    [<span class="num">115</span>, <span class="num">111</span>, <span class="num">117</span>, <span class="num">114</span>, <span class="num">99</span>, <span class="num">101</span>], <span class="com">// source</span>
+<a class="ln" id="L153" href="#L153">153</a>    [<span class="num">115</span>, <span class="num">112</span>, <span class="num">97</span>, <span class="num">110</span>], <span class="com">// span</span>
+<a class="ln" id="L154" href="#L154">154</a>    [<span class="num">115</span>, <span class="num">116</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">110</span>, <span class="num">103</span>], <span class="com">// strong</span>
+<a class="ln" id="L155" href="#L155">155</a>    [<span class="num">115</span>, <span class="num">117</span>, <span class="num">98</span>], <span class="com">// sub</span>
+<a class="ln" id="L156" href="#L156">156</a>    [<span class="num">115</span>, <span class="num">117</span>, <span class="num">109</span>, <span class="num">109</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">121</span>], <span class="com">// summary</span>
+<a class="ln" id="L157" href="#L157">157</a>    [<span class="num">115</span>, <span class="num">117</span>, <span class="num">112</span>], <span class="com">// sup</span>
+<a class="ln" id="L158" href="#L158">158</a>    [<span class="num">116</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// table</span>
+<a class="ln" id="L159" href="#L159">159</a>    [<span class="num">116</span>, <span class="num">98</span>, <span class="num">111</span>, <span class="num">100</span>, <span class="num">121</span>], <span class="com">// tbody</span>
+<a class="ln" id="L160" href="#L160">160</a>    [<span class="num">116</span>, <span class="num">100</span>], <span class="com">// td</span>
+<a class="ln" id="L161" href="#L161">161</a>    [<span class="num">116</span>, <span class="num">101</span>, <span class="num">120</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">97</span>], <span class="com">// textarea</span>
+<a class="ln" id="L162" href="#L162">162</a>    [<span class="num">116</span>, <span class="num">102</span>, <span class="num">111</span>, <span class="num">111</span>, <span class="num">116</span>], <span class="com">// tfoot</span>
+<a class="ln" id="L163" href="#L163">163</a>    [<span class="num">116</span>, <span class="num">104</span>], <span class="com">// th</span>
+<a class="ln" id="L164" href="#L164">164</a>    [<span class="num">116</span>, <span class="num">104</span>, <span class="num">101</span>, <span class="num">97</span>, <span class="num">100</span>], <span class="com">// thead</span>
+<a class="ln" id="L165" href="#L165">165</a>    [<span class="num">116</span>, <span class="num">105</span>, <span class="num">109</span>, <span class="num">101</span>], <span class="com">// time</span>
+<a class="ln" id="L166" href="#L166">166</a>    [<span class="num">116</span>, <span class="num">114</span>], <span class="com">// tr</span>
+<a class="ln" id="L167" href="#L167">167</a>    [<span class="num">116</span>, <span class="num">114</span>, <span class="num">97</span>, <span class="num">99</span>, <span class="num">107</span>], <span class="com">// track</span>
+<a class="ln" id="L168" href="#L168">168</a>    [<span class="num">117</span>], <span class="com">// u</span>
+<a class="ln" id="L169" href="#L169">169</a>    [<span class="num">117</span>, <span class="num">108</span>], <span class="com">// ul</span>
+<a class="ln" id="L170" href="#L170">170</a>    [<span class="num">118</span>, <span class="num">97</span>, <span class="num">114</span>], <span class="com">// var</span>
+<a class="ln" id="L171" href="#L171">171</a>    [<span class="num">118</span>, <span class="num">105</span>, <span class="num">100</span>, <span class="num">101</span>, <span class="num">111</span>], <span class="com">// video</span>
+<a class="ln" id="L172" href="#L172">172</a>    [<span class="num">119</span>, <span class="num">98</span>, <span class="num">114</span>] <span class="com">// wbr</span>
+<a class="ln" id="L173" href="#L173">173</a>  ]
+<a class="ln" id="L174" href="#L174">174</a>}
+<a class="ln" id="L175" href="#L175">175</a>
+<a class="ln" id="L176" href="#L176">176</a><span class="com">// Whether the tag `w` may be written: one of `tags`, or the name of a custom element (a name</span>
+<a class="ln" id="L177" href="#L177">177</a><span class="com">// with a `-`), which runs only the code the page defines for it.</span>
+<a class="ln" id="L178" href="#L178">178</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tag_allowed</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L179" href="#L179">179</a>  <span class="fn">Bool::and</span>(<a href="#L64"><span class="fn">name_ok</span></a>(w), <span class="fn">Bool::or</span>(<a href="#L34"><span class="fn">one_of</span></a>(w, <a href="#L76"><span class="fn">tags</span></a>()), <a href="#L41"><span class="fn">has_byte</span></a>(w, <span class="num">45</span>)))
+<a class="ln" id="L180" href="#L180">180</a>}
+<a class="ln" id="L181" href="#L181">181</a>
+<a class="ln" id="L182" href="#L182">182</a><span class="com">// Elements that have no end tag.</span>
+<a class="ln" id="L183" href="#L183">183</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">void_tags</span>(): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) {
+<a class="ln" id="L184" href="#L184">184</a>  [
+<a class="ln" id="L185" href="#L185">185</a>    [<span class="num">97</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">97</span>], <span class="com">// area</span>
+<a class="ln" id="L186" href="#L186">186</a>    [<span class="num">98</span>, <span class="num">114</span>], <span class="com">// br</span>
+<a class="ln" id="L187" href="#L187">187</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">108</span>], <span class="com">// col</span>
+<a class="ln" id="L188" href="#L188">188</a>    [<span class="num">104</span>, <span class="num">114</span>], <span class="com">// hr</span>
+<a class="ln" id="L189" href="#L189">189</a>    [<span class="num">105</span>, <span class="num">109</span>, <span class="num">103</span>], <span class="com">// img</span>
+<a class="ln" id="L190" href="#L190">190</a>    [<span class="num">105</span>, <span class="num">110</span>, <span class="num">112</span>, <span class="num">117</span>, <span class="num">116</span>], <span class="com">// input</span>
+<a class="ln" id="L191" href="#L191">191</a>    [<span class="num">115</span>, <span class="num">111</span>, <span class="num">117</span>, <span class="num">114</span>, <span class="num">99</span>, <span class="num">101</span>], <span class="com">// source</span>
+<a class="ln" id="L192" href="#L192">192</a>    [<span class="num">116</span>, <span class="num">114</span>, <span class="num">97</span>, <span class="num">99</span>, <span class="num">107</span>], <span class="com">// track</span>
+<a class="ln" id="L193" href="#L193">193</a>    [<span class="num">119</span>, <span class="num">98</span>, <span class="num">114</span>] <span class="com">// wbr</span>
+<a class="ln" id="L194" href="#L194">194</a>  ]
+<a class="ln" id="L195" href="#L195">195</a>}
+<a class="ln" id="L196" href="#L196">196</a>
+<a class="ln" id="L197" href="#L197">197</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">tag_void</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> { <a href="#L34"><span class="fn">one_of</span></a>(w, <a href="#L183"><span class="fn">void_tags</span></a>()) }
+<a class="ln" id="L198" href="#L198">198</a>
+<a class="ln" id="L199" href="#L199">199</a><span class="com">// ---- attributes -------------------------------------------------------------------------------</span>
+<a class="ln" id="L200" href="#L200">200</a>
+<a class="ln" id="L201" href="#L201">201</a><span class="com">// Attributes that run no code. Left out: the `on…` handlers, `style`, `srcdoc`, and any</span>
+<a class="ln" id="L202" href="#L202">202</a><span class="com">// attribute whose value is HTML, script or a URL other than those of `url_attrs`.</span>
+<a class="ln" id="L203" href="#L203">203</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">attrs</span>(): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) {
+<a class="ln" id="L204" href="#L204">204</a>  [
+<a class="ln" id="L205" href="#L205">205</a>    [<span class="num">97</span>, <span class="num">98</span>, <span class="num">98</span>, <span class="num">114</span>], <span class="com">// abbr</span>
+<a class="ln" id="L206" href="#L206">206</a>    [<span class="num">97</span>, <span class="num">99</span>, <span class="num">99</span>, <span class="num">101</span>, <span class="num">112</span>, <span class="num">116</span>], <span class="com">// accept</span>
+<a class="ln" id="L207" href="#L207">207</a>    [<span class="num">97</span>, <span class="num">99</span>, <span class="num">99</span>, <span class="num">101</span>, <span class="num">115</span>, <span class="num">115</span>, <span class="num">107</span>, <span class="num">101</span>, <span class="num">121</span>], <span class="com">// accesskey</span>
+<a class="ln" id="L208" href="#L208">208</a>    [<span class="num">97</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// action</span>
+<a class="ln" id="L209" href="#L209">209</a>    [<span class="num">97</span>, <span class="num">108</span>, <span class="num">116</span>], <span class="com">// alt</span>
+<a class="ln" id="L210" href="#L210">210</a>    [<span class="num">97</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">111</span>, <span class="num">99</span>, <span class="num">97</span>, <span class="num">112</span>, <span class="num">105</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">105</span>, <span class="num">122</span>, <span class="num">101</span>], <span class="com">// autocapitalize</span>
+<a class="ln" id="L211" href="#L211">211</a>    [<span class="num">97</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">111</span>, <span class="num">99</span>, <span class="num">111</span>, <span class="num">109</span>, <span class="num">112</span>, <span class="num">108</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// autocomplete</span>
+<a class="ln" id="L212" href="#L212">212</a>    [<span class="num">97</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">111</span>, <span class="num">102</span>, <span class="num">111</span>, <span class="num">99</span>, <span class="num">117</span>, <span class="num">115</span>], <span class="com">// autofocus</span>
+<a class="ln" id="L213" href="#L213">213</a>    [<span class="num">97</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">111</span>, <span class="num">112</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">121</span>], <span class="com">// autoplay</span>
+<a class="ln" id="L214" href="#L214">214</a>    [<span class="num">99</span>, <span class="num">104</span>, <span class="num">101</span>, <span class="num">99</span>, <span class="num">107</span>, <span class="num">101</span>, <span class="num">100</span>], <span class="com">// checked</span>
+<a class="ln" id="L215" href="#L215">215</a>    [<span class="num">99</span>, <span class="num">105</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// cite</span>
+<a class="ln" id="L216" href="#L216">216</a>    [<span class="num">99</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">115</span>, <span class="num">115</span>], <span class="com">// class</span>
+<a class="ln" id="L217" href="#L217">217</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">108</span>, <span class="num">115</span>], <span class="com">// cols</span>
+<a class="ln" id="L218" href="#L218">218</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">108</span>, <span class="num">115</span>, <span class="num">112</span>, <span class="num">97</span>, <span class="num">110</span>], <span class="com">// colspan</span>
+<a class="ln" id="L219" href="#L219">219</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">110</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">100</span>, <span class="num">105</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// contenteditable</span>
+<a class="ln" id="L220" href="#L220">220</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">110</span>, <span class="num">116</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">108</span>, <span class="num">115</span>], <span class="com">// controls</span>
+<a class="ln" id="L221" href="#L221">221</a>    [<span class="num">99</span>, <span class="num">111</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">100</span>, <span class="num">115</span>], <span class="com">// coords</span>
+<a class="ln" id="L222" href="#L222">222</a>    [<span class="num">99</span>, <span class="num">114</span>, <span class="num">111</span>, <span class="num">115</span>, <span class="num">115</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">105</span>, <span class="num">103</span>, <span class="num">105</span>, <span class="num">110</span>], <span class="com">// crossorigin</span>
+<a class="ln" id="L223" href="#L223">223</a>    [<span class="num">100</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">109</span>, <span class="num">101</span>], <span class="com">// datetime</span>
+<a class="ln" id="L224" href="#L224">224</a>    [<span class="num">100</span>, <span class="num">101</span>, <span class="num">99</span>, <span class="num">111</span>, <span class="num">100</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">103</span>], <span class="com">// decoding</span>
+<a class="ln" id="L225" href="#L225">225</a>    [<span class="num">100</span>, <span class="num">101</span>, <span class="num">102</span>, <span class="num">97</span>, <span class="num">117</span>, <span class="num">108</span>, <span class="num">116</span>], <span class="com">// default</span>
+<a class="ln" id="L226" href="#L226">226</a>    [<span class="num">100</span>, <span class="num">105</span>, <span class="num">114</span>], <span class="com">// dir</span>
+<a class="ln" id="L227" href="#L227">227</a>    [<span class="num">100</span>, <span class="num">105</span>, <span class="num">114</span>, <span class="num">110</span>, <span class="num">97</span>, <span class="num">109</span>, <span class="num">101</span>], <span class="com">// dirname</span>
+<a class="ln" id="L228" href="#L228">228</a>    [<span class="num">100</span>, <span class="num">105</span>, <span class="num">115</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">108</span>, <span class="num">101</span>, <span class="num">100</span>], <span class="com">// disabled</span>
+<a class="ln" id="L229" href="#L229">229</a>    [<span class="num">100</span>, <span class="num">111</span>, <span class="num">119</span>, <span class="num">110</span>, <span class="num">108</span>, <span class="num">111</span>, <span class="num">97</span>, <span class="num">100</span>], <span class="com">// download</span>
+<a class="ln" id="L230" href="#L230">230</a>    [<span class="num">100</span>, <span class="num">114</span>, <span class="num">97</span>, <span class="num">103</span>, <span class="num">103</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// draggable</span>
+<a class="ln" id="L231" href="#L231">231</a>    [<span class="num">101</span>, <span class="num">110</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">121</span>, <span class="num">112</span>, <span class="num">101</span>], <span class="com">// enctype</span>
+<a class="ln" id="L232" href="#L232">232</a>    [<span class="num">101</span>, <span class="num">110</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">107</span>, <span class="num">101</span>, <span class="num">121</span>, <span class="num">104</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">116</span>], <span class="com">// enterkeyhint</span>
+<a class="ln" id="L233" href="#L233">233</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>], <span class="com">// for</span>
+<a class="ln" id="L234" href="#L234">234</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>], <span class="com">// form</span>
+<a class="ln" id="L235" href="#L235">235</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>, <span class="num">97</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// formaction</span>
+<a class="ln" id="L236" href="#L236">236</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">121</span>, <span class="num">112</span>, <span class="num">101</span>], <span class="com">// formenctype</span>
+<a class="ln" id="L237" href="#L237">237</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>, <span class="num">109</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">104</span>, <span class="num">111</span>, <span class="num">100</span>], <span class="com">// formmethod</span>
+<a class="ln" id="L238" href="#L238">238</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>, <span class="num">110</span>, <span class="num">111</span>, <span class="num">118</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">105</span>, <span class="num">100</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// formnovalidate</span>
+<a class="ln" id="L239" href="#L239">239</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">103</span>, <span class="num">101</span>, <span class="num">116</span>], <span class="com">// formtarget</span>
+<a class="ln" id="L240" href="#L240">240</a>    [<span class="num">104</span>, <span class="num">101</span>, <span class="num">97</span>, <span class="num">100</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">115</span>], <span class="com">// headers</span>
+<a class="ln" id="L241" href="#L241">241</a>    [<span class="num">104</span>, <span class="num">101</span>, <span class="num">105</span>, <span class="num">103</span>, <span class="num">104</span>, <span class="num">116</span>], <span class="com">// height</span>
+<a class="ln" id="L242" href="#L242">242</a>    [<span class="num">104</span>, <span class="num">105</span>, <span class="num">100</span>, <span class="num">100</span>, <span class="num">101</span>, <span class="num">110</span>], <span class="com">// hidden</span>
+<a class="ln" id="L243" href="#L243">243</a>    [<span class="num">104</span>, <span class="num">105</span>, <span class="num">103</span>, <span class="num">104</span>], <span class="com">// high</span>
+<a class="ln" id="L244" href="#L244">244</a>    [<span class="num">104</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">102</span>], <span class="com">// href</span>
+<a class="ln" id="L245" href="#L245">245</a>    [<span class="num">104</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">102</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">110</span>, <span class="num">103</span>], <span class="com">// hreflang</span>
+<a class="ln" id="L246" href="#L246">246</a>    [<span class="num">105</span>, <span class="num">100</span>], <span class="com">// id</span>
+<a class="ln" id="L247" href="#L247">247</a>    [<span class="num">105</span>, <span class="num">110</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">116</span>], <span class="com">// inert</span>
+<a class="ln" id="L248" href="#L248">248</a>    [<span class="num">105</span>, <span class="num">110</span>, <span class="num">112</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">109</span>, <span class="num">111</span>, <span class="num">100</span>, <span class="num">101</span>], <span class="com">// inputmode</span>
+<a class="ln" id="L249" href="#L249">249</a>    [<span class="num">107</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">100</span>], <span class="com">// kind</span>
+<a class="ln" id="L250" href="#L250">250</a>    [<span class="num">108</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">101</span>, <span class="num">108</span>], <span class="com">// label</span>
+<a class="ln" id="L251" href="#L251">251</a>    [<span class="num">108</span>, <span class="num">97</span>, <span class="num">110</span>, <span class="num">103</span>], <span class="com">// lang</span>
+<a class="ln" id="L252" href="#L252">252</a>    [<span class="num">108</span>, <span class="num">105</span>, <span class="num">115</span>, <span class="num">116</span>], <span class="com">// list</span>
+<a class="ln" id="L253" href="#L253">253</a>    [<span class="num">108</span>, <span class="num">111</span>, <span class="num">97</span>, <span class="num">100</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">103</span>], <span class="com">// loading</span>
+<a class="ln" id="L254" href="#L254">254</a>    [<span class="num">108</span>, <span class="num">111</span>, <span class="num">111</span>, <span class="num">112</span>], <span class="com">// loop</span>
+<a class="ln" id="L255" href="#L255">255</a>    [<span class="num">108</span>, <span class="num">111</span>, <span class="num">119</span>], <span class="com">// low</span>
+<a class="ln" id="L256" href="#L256">256</a>    [<span class="num">109</span>, <span class="num">97</span>, <span class="num">120</span>], <span class="com">// max</span>
+<a class="ln" id="L257" href="#L257">257</a>    [<span class="num">109</span>, <span class="num">97</span>, <span class="num">120</span>, <span class="num">108</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">103</span>, <span class="num">116</span>, <span class="num">104</span>], <span class="com">// maxlength</span>
+<a class="ln" id="L258" href="#L258">258</a>    [<span class="num">109</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">104</span>, <span class="num">111</span>, <span class="num">100</span>], <span class="com">// method</span>
+<a class="ln" id="L259" href="#L259">259</a>    [<span class="num">109</span>, <span class="num">105</span>, <span class="num">110</span>], <span class="com">// min</span>
+<a class="ln" id="L260" href="#L260">260</a>    [<span class="num">109</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">108</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">103</span>, <span class="num">116</span>, <span class="num">104</span>], <span class="com">// minlength</span>
+<a class="ln" id="L261" href="#L261">261</a>    [<span class="num">109</span>, <span class="num">117</span>, <span class="num">108</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">112</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// multiple</span>
+<a class="ln" id="L262" href="#L262">262</a>    [<span class="num">109</span>, <span class="num">117</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">100</span>], <span class="com">// muted</span>
+<a class="ln" id="L263" href="#L263">263</a>    [<span class="num">110</span>, <span class="num">97</span>, <span class="num">109</span>, <span class="num">101</span>], <span class="com">// name</span>
+<a class="ln" id="L264" href="#L264">264</a>    [<span class="num">110</span>, <span class="num">111</span>, <span class="num">118</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">105</span>, <span class="num">100</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// novalidate</span>
+<a class="ln" id="L265" href="#L265">265</a>    [<span class="num">111</span>, <span class="num">112</span>, <span class="num">101</span>, <span class="num">110</span>], <span class="com">// open</span>
+<a class="ln" id="L266" href="#L266">266</a>    [<span class="num">111</span>, <span class="num">112</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">109</span>, <span class="num">117</span>, <span class="num">109</span>], <span class="com">// optimum</span>
+<a class="ln" id="L267" href="#L267">267</a>    [<span class="num">112</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">110</span>], <span class="com">// pattern</span>
+<a class="ln" id="L268" href="#L268">268</a>    [<span class="num">112</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">99</span>, <span class="num">101</span>, <span class="num">104</span>, <span class="num">111</span>, <span class="num">108</span>, <span class="num">100</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// placeholder</span>
+<a class="ln" id="L269" href="#L269">269</a>    [<span class="num">112</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">121</span>, <span class="num">115</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">108</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">101</span>], <span class="com">// playsinline</span>
+<a class="ln" id="L270" href="#L270">270</a>    [<span class="num">112</span>, <span class="num">111</span>, <span class="num">112</span>, <span class="num">111</span>, <span class="num">118</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// popover</span>
+<a class="ln" id="L271" href="#L271">271</a>    [<span class="num">112</span>, <span class="num">111</span>, <span class="num">112</span>, <span class="num">111</span>, <span class="num">118</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">103</span>, <span class="num">101</span>, <span class="num">116</span>], <span class="com">// popovertarget</span>
+<a class="ln" id="L272" href="#L272">272</a>    [<span class="num">112</span>, <span class="num">111</span>, <span class="num">112</span>, <span class="num">111</span>, <span class="num">118</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">103</span>, <span class="num">101</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// popovertargetaction</span>
+<a class="ln" id="L273" href="#L273">273</a>    [<span class="num">112</span>, <span class="num">111</span>, <span class="num">115</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// poster</span>
+<a class="ln" id="L274" href="#L274">274</a>    [<span class="num">112</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">108</span>, <span class="num">111</span>, <span class="num">97</span>, <span class="num">100</span>], <span class="com">// preload</span>
+<a class="ln" id="L275" href="#L275">275</a>    [<span class="num">114</span>, <span class="num">101</span>, <span class="num">97</span>, <span class="num">100</span>, <span class="num">111</span>, <span class="num">110</span>, <span class="num">108</span>, <span class="num">121</span>], <span class="com">// readonly</span>
+<a class="ln" id="L276" href="#L276">276</a>    [<span class="num">114</span>, <span class="num">101</span>, <span class="num">108</span>], <span class="com">// rel</span>
+<a class="ln" id="L277" href="#L277">277</a>    [<span class="num">114</span>, <span class="num">101</span>, <span class="num">113</span>, <span class="num">117</span>, <span class="num">105</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">100</span>], <span class="com">// required</span>
+<a class="ln" id="L278" href="#L278">278</a>    [<span class="num">114</span>, <span class="num">101</span>, <span class="num">118</span>, <span class="num">101</span>, <span class="num">114</span>, <span class="num">115</span>, <span class="num">101</span>, <span class="num">100</span>], <span class="com">// reversed</span>
+<a class="ln" id="L279" href="#L279">279</a>    [<span class="num">114</span>, <span class="num">111</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// role</span>
+<a class="ln" id="L280" href="#L280">280</a>    [<span class="num">114</span>, <span class="num">111</span>, <span class="num">119</span>, <span class="num">115</span>], <span class="com">// rows</span>
+<a class="ln" id="L281" href="#L281">281</a>    [<span class="num">114</span>, <span class="num">111</span>, <span class="num">119</span>, <span class="num">115</span>, <span class="num">112</span>, <span class="num">97</span>, <span class="num">110</span>], <span class="com">// rowspan</span>
+<a class="ln" id="L282" href="#L282">282</a>    [<span class="num">115</span>, <span class="num">99</span>, <span class="num">111</span>, <span class="num">112</span>, <span class="num">101</span>], <span class="com">// scope</span>
+<a class="ln" id="L283" href="#L283">283</a>    [<span class="num">115</span>, <span class="num">101</span>, <span class="num">108</span>, <span class="num">101</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">100</span>], <span class="com">// selected</span>
+<a class="ln" id="L284" href="#L284">284</a>    [<span class="num">115</span>, <span class="num">104</span>, <span class="num">97</span>, <span class="num">112</span>, <span class="num">101</span>], <span class="com">// shape</span>
+<a class="ln" id="L285" href="#L285">285</a>    [<span class="num">115</span>, <span class="num">105</span>, <span class="num">122</span>, <span class="num">101</span>], <span class="com">// size</span>
+<a class="ln" id="L286" href="#L286">286</a>    [<span class="num">115</span>, <span class="num">105</span>, <span class="num">122</span>, <span class="num">101</span>, <span class="num">115</span>], <span class="com">// sizes</span>
+<a class="ln" id="L287" href="#L287">287</a>    [<span class="num">115</span>, <span class="num">112</span>, <span class="num">97</span>, <span class="num">110</span>], <span class="com">// span</span>
+<a class="ln" id="L288" href="#L288">288</a>    [<span class="num">115</span>, <span class="num">112</span>, <span class="num">101</span>, <span class="num">108</span>, <span class="num">108</span>, <span class="num">99</span>, <span class="num">104</span>, <span class="num">101</span>, <span class="num">99</span>, <span class="num">107</span>], <span class="com">// spellcheck</span>
+<a class="ln" id="L289" href="#L289">289</a>    [<span class="num">115</span>, <span class="num">114</span>, <span class="num">99</span>], <span class="com">// src</span>
+<a class="ln" id="L290" href="#L290">290</a>    [<span class="num">115</span>, <span class="num">114</span>, <span class="num">99</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">110</span>, <span class="num">103</span>], <span class="com">// srclang</span>
+<a class="ln" id="L291" href="#L291">291</a>    [<span class="num">115</span>, <span class="num">114</span>, <span class="num">99</span>, <span class="num">115</span>, <span class="num">101</span>, <span class="num">116</span>], <span class="com">// srcset</span>
+<a class="ln" id="L292" href="#L292">292</a>    [<span class="num">115</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">116</span>], <span class="com">// start</span>
+<a class="ln" id="L293" href="#L293">293</a>    [<span class="num">115</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">112</span>], <span class="com">// step</span>
+<a class="ln" id="L294" href="#L294">294</a>    [<span class="num">116</span>, <span class="num">97</span>, <span class="num">98</span>, <span class="num">105</span>, <span class="num">110</span>, <span class="num">100</span>, <span class="num">101</span>, <span class="num">120</span>], <span class="com">// tabindex</span>
+<a class="ln" id="L295" href="#L295">295</a>    [<span class="num">116</span>, <span class="num">97</span>, <span class="num">114</span>, <span class="num">103</span>, <span class="num">101</span>, <span class="num">116</span>], <span class="com">// target</span>
+<a class="ln" id="L296" href="#L296">296</a>    [<span class="num">116</span>, <span class="num">105</span>, <span class="num">116</span>, <span class="num">108</span>, <span class="num">101</span>], <span class="com">// title</span>
+<a class="ln" id="L297" href="#L297">297</a>    [<span class="num">116</span>, <span class="num">114</span>, <span class="num">97</span>, <span class="num">110</span>, <span class="num">115</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// translate</span>
+<a class="ln" id="L298" href="#L298">298</a>    [<span class="num">116</span>, <span class="num">121</span>, <span class="num">112</span>, <span class="num">101</span>], <span class="com">// type</span>
+<a class="ln" id="L299" href="#L299">299</a>    [<span class="num">118</span>, <span class="num">97</span>, <span class="num">108</span>, <span class="num">117</span>, <span class="num">101</span>], <span class="com">// value</span>
+<a class="ln" id="L300" href="#L300">300</a>    [<span class="num">119</span>, <span class="num">105</span>, <span class="num">100</span>, <span class="num">116</span>, <span class="num">104</span>], <span class="com">// width</span>
+<a class="ln" id="L301" href="#L301">301</a>    [<span class="num">119</span>, <span class="num">114</span>, <span class="num">97</span>, <span class="num">112</span>] <span class="com">// wrap</span>
+<a class="ln" id="L302" href="#L302">302</a>  ]
+<a class="ln" id="L303" href="#L303">303</a>}
+<a class="ln" id="L304" href="#L304">304</a>
+<a class="ln" id="L305" href="#L305">305</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">data_prefix</span>(): <span class="ty">List</span>(<span class="ty">Nat</span>) { [<span class="num">100</span>, <span class="num">97</span>, <span class="num">116</span>, <span class="num">97</span>, <span class="num">45</span>] } <span class="com">// data-</span>
+<a class="ln" id="L306" href="#L306">306</a>
+<a class="ln" id="L307" href="#L307">307</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">aria_prefix</span>(): <span class="ty">List</span>(<span class="ty">Nat</span>) { [<span class="num">97</span>, <span class="num">114</span>, <span class="num">105</span>, <span class="num">97</span>, <span class="num">45</span>] } <span class="com">// aria-</span>
+<a class="ln" id="L308" href="#L308">308</a>
+<a class="ln" id="L309" href="#L309">309</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">style_name</span>(): <span class="ty">List</span>(<span class="ty">Nat</span>) { [<span class="num">115</span>, <span class="num">116</span>, <span class="num">121</span>, <span class="num">108</span>, <span class="num">101</span>] } <span class="com">// style</span>
+<a class="ln" id="L310" href="#L310">310</a>
+<a class="ln" id="L311" href="#L311">311</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">display_contents</span>(): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L312" href="#L312">312</a>  [<span class="num">100</span>, <span class="num">105</span>, <span class="num">115</span>, <span class="num">112</span>, <span class="num">108</span>, <span class="num">97</span>, <span class="num">121</span>, <span class="num">58</span>, <span class="num">99</span>, <span class="num">111</span>, <span class="num">110</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">110</span>, <span class="num">116</span>, <span class="num">115</span>] <span class="com">// display:contents</span>
+<a class="ln" id="L313" href="#L313">313</a>}
+<a class="ln" id="L314" href="#L314">314</a>
+<a class="ln" id="L315" href="#L315">315</a><span class="kw">pub</span> <span class="kw">module</span> <span class="ty">Attr</span> {
+<a class="ln" id="L316" href="#L316">316</a>  <span class="com">// Whether the attribute `w` may be written: one of `attrs`, or a `data-…` or `aria-…`</span>
+<a class="ln" id="L317" href="#L317">317</a>  <span class="com">// attribute.</span>
+<a class="ln" id="L318" href="#L318">318</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">allowed</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L319" href="#L319">319</a>    <span class="fn">Bool::and</span>(
+<a class="ln" id="L320" href="#L320">320</a>      <a href="#L64"><span class="fn">name_ok</span></a>(w),
+<a class="ln" id="L321" href="#L321">321</a>      <span class="fn">Bool::or</span>(
+<a class="ln" id="L322" href="#L322">322</a>        <a href="#L34"><span class="fn">one_of</span></a>(w, <a href="#L203"><span class="fn">attrs</span></a>()),
+<a class="ln" id="L323" href="#L323">323</a>        <span class="fn">Bool::or</span>(<a href="#L24"><span class="fn">begins_with</span></a>(w, <a href="#L305"><span class="fn">data_prefix</span></a>()), <a href="#L24"><span class="fn">begins_with</span></a>(w, <a href="#L307"><span class="fn">aria_prefix</span></a>()))
+<a class="ln" id="L324" href="#L324">324</a>      )
+<a class="ln" id="L325" href="#L325">325</a>    )
+<a class="ln" id="L326" href="#L326">326</a>  }
+<a class="ln" id="L327" href="#L327">327</a>
+<a class="ln" id="L328" href="#L328">328</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">is_url</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> { <a href="#L34"><span class="fn">one_of</span></a>(w, <a href="#L349"><span class="fn">url_attrs</span></a>()) }
+<a class="ln" id="L329" href="#L329">329</a>
+<a class="ln" id="L330" href="#L330">330</a>  <span class="com">// ---- URLs -------------------------------------------------------------------------------------</span>
+<a class="ln" id="L331" href="#L331">331</a>
+<a class="ln" id="L332" href="#L332">332</a>  <span class="com">// Whether `name=&quot;value&quot;` may be written. `style` is written only as `display:contents`, which</span>
+<a class="ln" id="L333" href="#L333">333</a>  <span class="com">// the renderers give the elements that hold a group, an island or trusted HTML.</span>
+<a class="ln" id="L334" href="#L334">334</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">value_allowed</span>(<span class="var">name</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">value</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L335" href="#L335">335</a>    <span class="fn">Bool::or</span>(
+<a class="ln" id="L336" href="#L336">336</a>      <span class="fn">Bool::and</span>(
+<a class="ln" id="L337" href="#L337">337</a>        <a href="#L318"><span class="fn">Attr::allowed</span></a>(name),
+<a class="ln" id="L338" href="#L338">338</a>        ⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> <a href="#L328"><span class="fn">Attr::is_url</span></a>(name) {
+<a class="ln" id="L339" href="#L339">339</a>          <span class="kw">true</span> =&gt; <a href="#L425"><span class="fn">url_allowed</span></a>(value)
+<a class="ln" id="L340" href="#L340">340</a>          <span class="kw">false</span> =&gt; <span class="kw">true</span>
+<a class="ln" id="L341" href="#L341">341</a>        }
+<a class="ln" id="L342" href="#L342">342</a>      ),
+<a class="ln" id="L343" href="#L343">343</a>      <span class="fn">Bool::and</span>(<a href="#L11"><span class="fn">same_bytes</span></a>(name, <a href="#L309"><span class="fn">style_name</span></a>()), <a href="#L11"><span class="fn">same_bytes</span></a>(value, <a href="#L311"><span class="fn">display_contents</span></a>()))
+<a class="ln" id="L344" href="#L344">344</a>    )
+<a class="ln" id="L345" href="#L345">345</a>  }
+<a class="ln" id="L346" href="#L346">346</a>}
+<a class="ln" id="L347" href="#L347">347</a>
+<a class="ln" id="L348" href="#L348">348</a><span class="com">// The attributes of `attrs` whose value is a URL.</span>
+<a class="ln" id="L349" href="#L349">349</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">url_attrs</span>(): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) {
+<a class="ln" id="L350" href="#L350">350</a>  [
+<a class="ln" id="L351" href="#L351">351</a>    [<span class="num">97</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// action</span>
+<a class="ln" id="L352" href="#L352">352</a>    [<span class="num">99</span>, <span class="num">105</span>, <span class="num">116</span>, <span class="num">101</span>], <span class="com">// cite</span>
+<a class="ln" id="L353" href="#L353">353</a>    [<span class="num">102</span>, <span class="num">111</span>, <span class="num">114</span>, <span class="num">109</span>, <span class="num">97</span>, <span class="num">99</span>, <span class="num">116</span>, <span class="num">105</span>, <span class="num">111</span>, <span class="num">110</span>], <span class="com">// formaction</span>
+<a class="ln" id="L354" href="#L354">354</a>    [<span class="num">104</span>, <span class="num">114</span>, <span class="num">101</span>, <span class="num">102</span>], <span class="com">// href</span>
+<a class="ln" id="L355" href="#L355">355</a>    [<span class="num">112</span>, <span class="num">111</span>, <span class="num">115</span>, <span class="num">116</span>, <span class="num">101</span>, <span class="num">114</span>], <span class="com">// poster</span>
+<a class="ln" id="L356" href="#L356">356</a>    [<span class="num">115</span>, <span class="num">114</span>, <span class="num">99</span>] <span class="com">// src</span>
+<a class="ln" id="L357" href="#L357">357</a>  ]
+<a class="ln" id="L358" href="#L358">358</a>}
+<a class="ln" id="L359" href="#L359">359</a>
+<a class="ln" id="L360" href="#L360">360</a><span class="kw">fn</span> <span class="fn">ascii_lower</span>(<span class="var">c</span>: <span class="ty">Nat</span>): <span class="ty">Nat</span> {
+<a class="ln" id="L361" href="#L361">361</a>  <span class="kw">match</span> <span class="fn">Bool::and</span>(<span class="fn">Nat::le</span>(<span class="num">65</span>, c), <span class="fn">Nat::le</span>(c, <span class="num">90</span>)) {
+<a class="ln" id="L362" href="#L362">362</a>    <span class="kw">true</span> =&gt; <span class="fn">Nat::add</span>(c, <span class="num">32</span>)
+<a class="ln" id="L363" href="#L363">363</a>    <span class="kw">false</span> =&gt; c
+<a class="ln" id="L364" href="#L364">364</a>  }
+<a class="ln" id="L365" href="#L365">365</a>}
+<a class="ln" id="L366" href="#L366">366</a>
+<a class="ln" id="L367" href="#L367">367</a><span class="com">// The bytes of a URL before its first `/`, `?` or `#`, lowercased, without the spaces and</span>
+<a class="ln" id="L368" href="#L368">368</a><span class="com">// control bytes a browser skips (it skips fewer, so what it reads as a scheme is read here</span>
+<a class="ln" id="L369" href="#L369">369</a><span class="com">// too).</span>
+<a class="ln" id="L370" href="#L370">370</a><span class="kw">fn</span> <span class="fn">url_head</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L371" href="#L371">371</a>  <span class="kw">match</span> w {
+<a class="ln" id="L372" href="#L372">372</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L373" href="#L373">373</a>    <span class="ty">Cons</span>(c, rest) =&gt; ⊢ <span class="ty">List</span>(<span class="ty">Nat</span>) <span class="kw">from</span> <span class="kw">match</span> <span class="fn">Bool::or</span>(
+<a class="ln" id="L374" href="#L374">374</a>      <span class="fn">Nat::eq</span>(c, <span class="num">47</span>),
+<a class="ln" id="L375" href="#L375">375</a>      <span class="fn">Bool::or</span>(<span class="fn">Nat::eq</span>(c, <span class="num">63</span>), <span class="fn">Nat::eq</span>(c, <span class="num">35</span>))
+<a class="ln" id="L376" href="#L376">376</a>    ) {
+<a class="ln" id="L377" href="#L377">377</a>      <span class="kw">true</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L378" href="#L378">378</a>      <span class="kw">false</span> =&gt; ⊢ <span class="ty">List</span>(<span class="ty">Nat</span>) <span class="kw">from</span> <span class="kw">match</span> <span class="fn">Nat::le</span>(c, <span class="num">32</span>) {
+<a class="ln" id="L379" href="#L379">379</a>        <span class="kw">true</span> =&gt; <a href="#L370"><span class="fn">url_head</span></a>(rest)
+<a class="ln" id="L380" href="#L380">380</a>        <span class="kw">false</span> =&gt; <span class="ty">Cons</span>(<a href="#L360"><span class="fn">ascii_lower</span></a>(c), <a href="#L370"><span class="fn">url_head</span></a>(rest))
+<a class="ln" id="L381" href="#L381">381</a>      }
+<a class="ln" id="L382" href="#L382">382</a>    }
+<a class="ln" id="L383" href="#L383">383</a>  }
+<a class="ln" id="L384" href="#L384">384</a>}
+<a class="ln" id="L385" href="#L385">385</a>
+<a class="ln" id="L386" href="#L386">386</a><span class="com">// The bytes before the first `:`.</span>
+<a class="ln" id="L387" href="#L387">387</a><span class="kw">fn</span> <span class="fn">before_colon</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L388" href="#L388">388</a>  <span class="kw">match</span> w {
+<a class="ln" id="L389" href="#L389">389</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L390" href="#L390">390</a>    <span class="ty">Cons</span>(c, rest) =&gt; ⊢ <span class="ty">List</span>(<span class="ty">Nat</span>) <span class="kw">from</span> <span class="kw">match</span> <span class="fn">Nat::eq</span>(c, <span class="num">58</span>) {
+<a class="ln" id="L391" href="#L391">391</a>      <span class="kw">true</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L392" href="#L392">392</a>      <span class="kw">false</span> =&gt; <span class="ty">Cons</span>(c, <a href="#L387"><span class="fn">before_colon</span></a>(rest))
+<a class="ln" id="L393" href="#L393">393</a>    }
+<a class="ln" id="L394" href="#L394">394</a>  }
+<a class="ln" id="L395" href="#L395">395</a>}
+<a class="ln" id="L396" href="#L396">396</a>
+<a class="ln" id="L397" href="#L397">397</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">schemes</span>(): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) {
+<a class="ln" id="L398" href="#L398">398</a>  [
+<a class="ln" id="L399" href="#L399">399</a>    [<span class="num">104</span>, <span class="num">116</span>, <span class="num">116</span>, <span class="num">112</span>], <span class="com">// http</span>
+<a class="ln" id="L400" href="#L400">400</a>    [<span class="num">104</span>, <span class="num">116</span>, <span class="num">116</span>, <span class="num">112</span>, <span class="num">115</span>], <span class="com">// https</span>
+<a class="ln" id="L401" href="#L401">401</a>    [<span class="num">109</span>, <span class="num">97</span>, <span class="num">105</span>, <span class="num">108</span>, <span class="num">116</span>, <span class="num">111</span>], <span class="com">// mailto</span>
+<a class="ln" id="L402" href="#L402">402</a>    [<span class="num">116</span>, <span class="num">101</span>, <span class="num">108</span>] <span class="com">// tel</span>
+<a class="ln" id="L403" href="#L403">403</a>  ]
+<a class="ln" id="L404" href="#L404">404</a>}
+<a class="ln" id="L405" href="#L405">405</a>
+<a class="ln" id="L406" href="#L406">406</a><span class="com">// `&amp;`, `&lt;`, `&gt;` and `&quot;`: a character reference could spell a `:` or a scheme, and escaping</span>
+<a class="ln" id="L407" href="#L407">407</a><span class="com">// the others would add an `&amp;`.</span>
+<a class="ln" id="L408" href="#L408">408</a><span class="kw">fn</span> <span class="fn">has_markup</span>(<span class="var">h</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L409" href="#L409">409</a>  <span class="fn">Bool::or</span>(<span class="fn">Bool::or</span>(<a href="#L41"><span class="fn">has_byte</span></a>(h, <span class="num">38</span>), <a href="#L41"><span class="fn">has_byte</span></a>(h, <span class="num">60</span>)), <span class="fn">Bool::or</span>(<a href="#L41"><span class="fn">has_byte</span></a>(h, <span class="num">62</span>), <a href="#L41"><span class="fn">has_byte</span></a>(h, <span class="num">34</span>)))
+<a class="ln" id="L410" href="#L410">410</a>}
+<a class="ln" id="L411" href="#L411">411</a>
+<a class="ln" id="L412" href="#L412">412</a><span class="kw">fn</span> <span class="fn">head_allowed</span>(<span class="var">h</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L413" href="#L413">413</a>  <span class="kw">match</span> <a href="#L408"><span class="fn">has_markup</span></a>(h) {
+<a class="ln" id="L414" href="#L414">414</a>    <span class="kw">true</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L415" href="#L415">415</a>    <span class="kw">false</span> =&gt; ⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> <a href="#L41"><span class="fn">has_byte</span></a>(h, <span class="num">58</span>) {
+<a class="ln" id="L416" href="#L416">416</a>      <span class="kw">true</span> =&gt; <a href="#L34"><span class="fn">one_of</span></a>(<a href="#L387"><span class="fn">before_colon</span></a>(h), <a href="#L397"><span class="fn">schemes</span></a>())
+<a class="ln" id="L417" href="#L417">417</a>      <span class="com">// No scheme: a path relative to the page.</span>
+<a class="ln" id="L418" href="#L418">418</a>      <span class="kw">false</span> =&gt; <span class="kw">true</span>
+<a class="ln" id="L419" href="#L419">419</a>    }
+<a class="ln" id="L420" href="#L420">420</a>  }
+<a class="ln" id="L421" href="#L421">421</a>}
+<a class="ln" id="L422" href="#L422">422</a>
+<a class="ln" id="L423" href="#L423">423</a><span class="com">// Whether the URL `w` may be written: one relative to the page, or one whose scheme is `http`,</span>
+<a class="ln" id="L424" href="#L424">424</a><span class="com">// `https`, `mailto` or `tel`; and no `&amp;`, `&lt;`, `&gt;` or `&quot;` before its first `/`, `?` or `#`.</span>
+<a class="ln" id="L425" href="#L425">425</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">url_allowed</span>(<span class="var">w</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> { <a href="#L412"><span class="fn">head_allowed</span></a>(<a href="#L370"><span class="fn">url_head</span></a>(w)) }
+</code></pre>
+</html>

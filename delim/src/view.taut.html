@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/view.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/view.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::macro {
+<a class="ln" id="L2" href="#L2">2</a>  <span class="ty">Syn</span>,
+<a class="ln" id="L3" href="#L3">3</a>  <span class="ty">SynArm</span>,
+<a class="ln" id="L4" href="#L4">4</a>  <span class="ty">SynBinder</span>,
+<a class="ln" id="L5" href="#L5">5</a>  <span class="ty">SynExpr</span>,
+<a class="ln" id="L6" href="#L6">6</a>  <span class="ty">SynHighlight</span>,
+<a class="ln" id="L7" href="#L7">7</a>  <span class="ty">SynPattern</span>,
+<a class="ln" id="L8" href="#L8">8</a>  <span class="ty">SynSpan</span>,
+<a class="ln" id="L9" href="#L9">9</a>  <span class="ty">SynTok</span>,
+<a class="ln" id="L10" href="#L10">10</a>  <span class="ty">SynToken</span>,
+<a class="ln" id="L11" href="#L11">11</a>  macro_error
+<a class="ln" id="L12" href="#L12">12</a>}
+<a class="ln" id="L13" href="#L13">13</a><span class="kw">import</span> <span class="str">&quot;tree.taut&quot;</span> {
+<a class="ln" id="L14" href="#L14">14</a>  <span class="ty">EventData</span>,
+<a class="ln" id="L15" href="#L15">15</a>  <span class="ty">EventKind</span>,
+<a class="ln" id="L16" href="#L16">16</a>  <span class="ty">Prop</span>,
+<a class="ln" id="L17" href="#L17">17</a>  el,
+<a class="ln" id="L18" href="#L18">18</a>  event_text,
+<a class="ln" id="L19" href="#L19">19</a>  fragment,
+<a class="ln" id="L20" href="#L20">20</a>  keyed_each_signal,
+<a class="ln" id="L21" href="#L21">21</a>  show,
+<a class="ln" id="L22" href="#L22">22</a>  switch_on,
+<a class="ln" id="L23" href="#L23">23</a>  switch_on_change,
+<a class="ln" id="L24" href="#L24">24</a>  text
+<a class="ln" id="L25" href="#L25">25</a>}
+<a class="ln" id="L26" href="#L26">26</a>
+<a class="ln" id="L27" href="#L27">27</a><span class="com">// `view!` writes elements of the web renderers as markup:</span>
+<a class="ln" id="L28" href="#L28">28</a><span class="com">//</span>
+<a class="ln" id="L29" href="#L29">29</a><span class="com">//   view!(`$t &lt;div class=&quot;row&quot;&gt;&lt;p&gt;&quot;Count: &quot; $text_dyn(t, () =&gt; decimal(get(n)))&lt;/p&gt;</span>
+<a class="ln" id="L30" href="#L30">30</a><span class="com">//     &lt;button aria-label=&quot;Add&quot; on:press=${(d: EventData) =&gt; update(n, (x: u64) =&gt; x + 1)}&gt;&quot;+&quot;&lt;/button&gt;</span>
+<a class="ln" id="L31" href="#L31">31</a><span class="com">//   &lt;/div&gt;`)</span>
+<a class="ln" id="L32" href="#L32">32</a><span class="com">//</span>
+<a class="ln" id="L33" href="#L33">33</a><span class="com">// The expression first is the tree. An attribute is a quoted text, fixed, or `${e}` with `e`</span>
+<a class="ln" id="L34" href="#L34">34</a><span class="com">// a text, followed; `on:press` and the other event names take a handler of the event's data.</span>
+<a class="ln" id="L35" href="#L35">35</a><span class="com">// A child is an element, a quoted text, or `${e}` with `e` a node.</span>
+<a class="ln" id="L36" href="#L36">36</a>
+<a class="ln" id="L37" href="#L37">37</a><span class="kw">syntax!</span>(view, ```par
+<a class="ln" id="L38" href="#L38">38</a><span class="kw">%start</span> <span class="ty">View</span>
+<a class="ln" id="L39" href="#L39">39</a><span class="kw">%title</span> <span class="str">&quot;view&quot;</span>
+<a class="ln" id="L40" href="#L40">40</a><span class="kw">%%</span>
+<a class="ln" id="L41" href="#L41">41</a><span class="ty">View</span><span class="op">:</span> <span class="op">[</span> <span class="ty">TreeInput</span> <span class="op">]</span> <span class="ty">Child</span><span class="op">;</span>
+<a class="ln" id="L42" href="#L42">42</a><span class="ty">TreeInput</span><span class="op">:</span> <span class="ty">TautoExpr</span><span class="op">;</span>
+<a class="ln" id="L43" href="#L43">43</a><span class="ty">Element</span><span class="op">:</span> <span class="ty">Lt</span> <span class="ty">Name</span> <span class="op">{</span> <span class="ty">Attr</span> <span class="op">}</span> <span class="ty">Rest</span><span class="op">;</span>
+<a class="ln" id="L44" href="#L44">44</a><span class="ty">Rest</span><span class="op">:</span> <span class="ty">SlashGt</span> <span class="op">|</span> <span class="ty">Body</span><span class="op">;</span>
+<a class="ln" id="L45" href="#L45">45</a><span class="ty">Body</span><span class="op">:</span> <span class="ty">Gt</span> <span class="op">{</span> <span class="ty">Child</span> <span class="op">}</span> <span class="ty">LtSlash</span> <span class="ty">Name</span> <span class="ty">Gt</span><span class="op">;</span>
+<a class="ln" id="L46" href="#L46">46</a><span class="ty">Fragment</span><span class="op">:</span> <span class="ty">FragOpen</span> <span class="op">{</span> <span class="ty">Child</span> <span class="op">}</span> <span class="ty">FragClose</span><span class="op">;</span>
+<a class="ln" id="L47" href="#L47">47</a><span class="ty">Block</span><span class="op">:</span> <span class="ty">LBrace</span> <span class="op">{</span> <span class="ty">Child</span> <span class="op">}</span> <span class="ty">RBrace</span><span class="op">;</span>
+<a class="ln" id="L48" href="#L48">48</a><span class="ty">Conditional</span><span class="op">:</span> <span class="ty">KwIf</span> <span class="ty">TautoExpr</span> <span class="ty">Block</span> <span class="op">[</span> <span class="ty">Otherwise</span> <span class="op">]</span><span class="op">;</span>
+<a class="ln" id="L49" href="#L49">49</a><span class="ty">Otherwise</span><span class="op">:</span> <span class="ty">KwElse</span> <span class="ty">ElseBody</span><span class="op">;</span>
+<a class="ln" id="L50" href="#L50">50</a><span class="ty">ElseBody</span><span class="op">:</span> <span class="ty">Block</span> <span class="op">|</span> <span class="ty">Conditional</span><span class="op">;</span>
+<a class="ln" id="L51" href="#L51">51</a><span class="ty">Each</span><span class="op">:</span> <span class="ty">KwFor</span> <span class="ty">Name</span> <span class="ty">InWord</span> <span class="ty">TautoExpr</span> <span class="ty">KeyWord</span> <span class="ty">TautoExpr</span> <span class="ty">Block</span><span class="op">;</span>
+<a class="ln" id="L52" href="#L52">52</a><span class="ty">InWord</span><span class="op">:</span> <span class="ty">Name</span><span class="op">;</span>
+<a class="ln" id="L53" href="#L53">53</a><span class="ty">KeyWord</span><span class="op">:</span> <span class="ty">Name</span><span class="op">;</span>
+<a class="ln" id="L54" href="#L54">54</a><span class="ty">Selection</span><span class="op">:</span> <span class="ty">KwMatch</span> <span class="ty">TautoExpr</span> <span class="ty">LBrace</span> <span class="op">{</span> <span class="ty">Arm</span> <span class="op">}</span> <span class="ty">RBrace</span><span class="op">;</span>
+<a class="ln" id="L55" href="#L55">55</a><span class="ty">Arm</span><span class="op">:</span> <span class="ty">Pattern</span> <span class="ty">Arrow</span> <span class="ty">Block</span><span class="op">;</span>
+<a class="ln" id="L56" href="#L56">56</a><span class="ty">Pattern</span><span class="op">:</span> <span class="ty">Name</span> <span class="op">[</span> <span class="ty">PatternArgs</span> <span class="op">]</span> <span class="op">|</span> <span class="ty">TautoExpr</span><span class="op">;</span>
+<a class="ln" id="L57" href="#L57">57</a><span class="ty">PatternArgs</span><span class="op">:</span> <span class="ty">LParen</span> <span class="op">[</span> <span class="ty">PatternList</span> <span class="op">]</span> <span class="ty">RParen</span><span class="op">;</span>
+<a class="ln" id="L58" href="#L58">58</a><span class="ty">PatternList</span><span class="op">:</span> <span class="ty">Pattern</span> <span class="op">{</span> <span class="ty">PatternTail</span> <span class="op">}</span><span class="op">;</span>
+<a class="ln" id="L59" href="#L59">59</a><span class="ty">PatternTail</span><span class="op">:</span> <span class="ty">Comma</span> <span class="ty">Pattern</span><span class="op">;</span>
+<a class="ln" id="L60" href="#L60">60</a><span class="ty">Attr</span><span class="op">:</span> <span class="ty">Name</span> <span class="ty">Equals</span> <span class="ty">Value</span><span class="op">;</span>
+<a class="ln" id="L61" href="#L61">61</a><span class="ty">Value</span><span class="op">:</span> <span class="ty">Str</span> <span class="op">|</span> <span class="ty">TautoExpr</span><span class="op">;</span>
+<a class="ln" id="L62" href="#L62">62</a><span class="ty">Mount</span><span class="op">:</span> <span class="ty">KwMount</span> <span class="ty">Name</span> <span class="ty">LParen</span> <span class="op">[</span> <span class="ty">MountArgs</span> <span class="op">]</span> <span class="ty">RParen</span><span class="op">;</span>
+<a class="ln" id="L63" href="#L63">63</a><span class="ty">MountArgs</span><span class="op">:</span> <span class="ty">MountArg</span> <span class="op">{</span> <span class="ty">MountArgTail</span> <span class="op">}</span><span class="op">;</span>
+<a class="ln" id="L64" href="#L64">64</a><span class="ty">MountArgTail</span><span class="op">:</span> <span class="ty">Comma</span> <span class="ty">MountArg</span><span class="op">;</span>
+<a class="ln" id="L65" href="#L65">65</a><span class="ty">MountArg</span><span class="op">:</span> <span class="ty">Name</span> <span class="ty">TautoExpr</span><span class="op">;</span>
+<a class="ln" id="L66" href="#L66">66</a><span class="ty">Child</span><span class="op">:</span> <span class="ty">Element</span> <span class="op">|</span> <span class="ty">Fragment</span> <span class="op">|</span> <span class="ty">Conditional</span> <span class="op">|</span> <span class="ty">Each</span> <span class="op">|</span> <span class="ty">Selection</span> <span class="op">|</span> <span class="ty">Mount</span> <span class="op">|</span> <span class="ty">Str</span> <span class="op">|</span> <span class="ty">TautoExpr</span><span class="op">;</span>
+<a class="ln" id="L67" href="#L67">67</a><span class="ty">FragOpen</span><span class="op">:</span> <span class="str">'&lt;&gt;'</span><span class="op">;</span>
+<a class="ln" id="L68" href="#L68">68</a><span class="ty">FragClose</span><span class="op">:</span> <span class="str">'&lt;/&gt;'</span><span class="op">;</span>
+<a class="ln" id="L69" href="#L69">69</a><span class="ty">KwIf</span><span class="op">:</span> <span class="str">'@if'</span><span class="op">;</span>
+<a class="ln" id="L70" href="#L70">70</a><span class="ty">KwElse</span><span class="op">:</span> <span class="str">'@else'</span><span class="op">;</span>
+<a class="ln" id="L71" href="#L71">71</a><span class="ty">KwFor</span><span class="op">:</span> <span class="str">'@for'</span><span class="op">;</span>
+<a class="ln" id="L72" href="#L72">72</a><span class="ty">KwMatch</span><span class="op">:</span> <span class="str">'@match'</span><span class="op">;</span>
+<a class="ln" id="L73" href="#L73">73</a><span class="ty">KwMount</span><span class="op">:</span> <span class="str">'@mount'</span><span class="op">;</span>
+<a class="ln" id="L74" href="#L74">74</a><span class="ty">LBrace</span><span class="op">:</span> <span class="str">'{'</span><span class="op">;</span>
+<a class="ln" id="L75" href="#L75">75</a><span class="ty">RBrace</span><span class="op">:</span> <span class="str">'}'</span><span class="op">;</span>
+<a class="ln" id="L76" href="#L76">76</a><span class="ty">LParen</span><span class="op">:</span> <span class="str">'('</span><span class="op">;</span>
+<a class="ln" id="L77" href="#L77">77</a><span class="ty">RParen</span><span class="op">:</span> <span class="str">')'</span><span class="op">;</span>
+<a class="ln" id="L78" href="#L78">78</a><span class="ty">Comma</span><span class="op">:</span> <span class="str">','</span><span class="op">;</span>
+<a class="ln" id="L79" href="#L79">79</a><span class="ty">Arrow</span><span class="op">:</span> <span class="str">'=&gt;'</span><span class="op">;</span>
+<a class="ln" id="L80" href="#L80">80</a><span class="ty">LtSlash</span><span class="op">:</span> <span class="str">'&lt;/'</span><span class="op">;</span>
+<a class="ln" id="L81" href="#L81">81</a><span class="ty">SlashGt</span><span class="op">:</span> <span class="str">'/&gt;'</span><span class="op">;</span>
+<a class="ln" id="L82" href="#L82">82</a><span class="ty">Lt</span><span class="op">:</span> <span class="str">'&lt;'</span><span class="op">;</span>
+<a class="ln" id="L83" href="#L83">83</a><span class="ty">Gt</span><span class="op">:</span> <span class="str">'&gt;'</span><span class="op">;</span>
+<a class="ln" id="L84" href="#L84">84</a><span class="ty">Equals</span><span class="op">:</span> <span class="str">'='</span><span class="op">;</span>
+<a class="ln" id="L85" href="#L85">85</a><span class="ty">Name</span><span class="op">:</span> <span class="str">/[A-Za-z_][A-Za-z0-9_:-]*/</span><span class="op">;</span>
+<a class="ln" id="L86" href="#L86">86</a><span class="ty">Str</span><span class="op">:</span> <span class="str">/&quot;[^&quot;]*&quot;/</span><span class="op">;</span>
+<a class="ln" id="L87" href="#L87">87</a>```, <span class="kw">with</span>(<span class="var">fmt</span>: view_fmt, <span class="var">tokens</span>: view_tokens)) =&gt; <span class="kw">struct</span> <span class="ty">View</span>, <span class="kw">struct</span> <span class="ty">Element</span>, <span class="kw">enum</span> <span class="ty">Rest</span>, <span class="kw">struct</span> <span class="ty">Body</span>, <span class="kw">struct</span> <span class="ty">Attr</span>, <span class="kw">enum</span> <span class="ty">Value</span>,
+<a class="ln" id="L88" href="#L88">88</a>  <span class="kw">enum</span> <span class="ty">Child</span>, <span class="kw">struct</span> <span class="ty">Fragment</span>, <span class="kw">struct</span> <span class="ty">Block</span>, <span class="kw">struct</span> <span class="ty">Conditional</span>, <span class="kw">struct</span> <span class="ty">Otherwise</span>, <span class="kw">enum</span> <span class="ty">ElseBody</span>,
+<a class="ln" id="L89" href="#L89">89</a>  <span class="kw">struct</span> <span class="ty">Each</span>, <span class="kw">struct</span> <span class="ty">InWord</span>, <span class="kw">struct</span> <span class="ty">KeyWord</span>, <span class="kw">struct</span> <span class="ty">Selection</span>, <span class="kw">struct</span> <span class="ty">Arm</span>, <span class="kw">enum</span> <span class="ty">Pattern</span>, <span class="kw">struct</span> <span class="ty">PatternArgs</span>, <span class="kw">struct</span> <span class="ty">PatternList</span>,
+<a class="ln" id="L90" href="#L90">90</a>  <span class="kw">struct</span> <span class="ty">PatternTail</span>, <span class="kw">struct</span> <span class="ty">Mount</span>, <span class="kw">struct</span> <span class="ty">MountArgs</span>, <span class="kw">struct</span> <span class="ty">MountArgTail</span>, <span class="kw">struct</span> <span class="ty">MountArg</span>, <span class="kw">fn</span> parse
+<a class="ln" id="L91" href="#L91">91</a>
+<a class="ln" id="L92" href="#L92">92</a><span class="com">// ---- the tools: `tauto fmt` and the language server's colours --------------------------------</span>
+<a class="ln" id="L93" href="#L93">93</a><span class="com">// Both read the scanner's tokens. A tag's name is a type, an attribute's a property, a quoted</span>
+<a class="ln" id="L94" href="#L94">94</a><span class="com">// text a string and the marks operators; a `${…}` is left to the colours of tauto.</span>
+<a class="ln" id="L95" href="#L95">95</a>
+<a class="ln" id="L96" href="#L96">96</a><span class="kw">fn</span> <span class="fn">view_mark</span>(<span class="var">t</span>: <span class="ty">SynTok</span>, <span class="var">kind</span>: <span class="ty">Text</span>, <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">SynHighlight</span>)): <span class="ty">List</span>(<span class="ty">SynHighlight</span>) {
+<a class="ln" id="L97" href="#L97">97</a>  <span class="ty">Cons</span>(<span class="ty">SynHighlight</span> { start: t.start, end: t.end, kind: kind }, rest)
+<a class="ln" id="L98" href="#L98">98</a>}
+<a class="ln" id="L99" href="#L99">99</a>
+<a class="ln" id="L100" href="#L100">100</a><span class="com">// `tag` says the token before was `&lt;` or `&lt;/`.</span>
+<a class="ln" id="L101" href="#L101">101</a><span class="kw">fn</span> <span class="fn">view_colour</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>), <span class="var">tag</span>: <span class="ty">Bool</span>): <span class="ty">List</span>(<span class="ty">SynHighlight</span>) ! {div} {
+<a class="ln" id="L102" href="#L102">102</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L103" href="#L103">103</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L104" href="#L104">104</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> t.skipped { <a href="#L101"><span class="fn">view_colour</span></a>(rest, tag) } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;Name&quot;</span> {
+<a class="ln" id="L105" href="#L105">105</a>      <a href="#L96"><span class="fn">view_mark</span></a>(t, <span class="kw">if</span> tag { <span class="str">&quot;type&quot;</span> } <span class="kw">else</span> { <span class="str">&quot;property&quot;</span> }, <a href="#L101"><span class="fn">view_colour</span></a>(rest, <span class="kw">false</span>))
+<a class="ln" id="L106" href="#L106">106</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;Str&quot;</span> {
+<a class="ln" id="L107" href="#L107">107</a>      <a href="#L96"><span class="fn">view_mark</span></a>(t, <span class="str">&quot;string&quot;</span>, <a href="#L101"><span class="fn">view_colour</span></a>(rest, <span class="kw">false</span>))
+<a class="ln" id="L108" href="#L108">108</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;TautoExpr&quot;</span> {
+<a class="ln" id="L109" href="#L109">109</a>      <a href="#L101"><span class="fn">view_colour</span></a>(rest, <span class="kw">false</span>)
+<a class="ln" id="L110" href="#L110">110</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;KwIf&quot;</span> || t.kind == <span class="str">&quot;KwElse&quot;</span> || t.kind == <span class="str">&quot;KwFor&quot;</span> || t.kind == <span class="str">&quot;KwMatch&quot;</span> || t.kind == <span class="str">&quot;KwMount&quot;</span> {
+<a class="ln" id="L111" href="#L111">111</a>      <a href="#L96"><span class="fn">view_mark</span></a>(t, <span class="str">&quot;keyword&quot;</span>, <a href="#L101"><span class="fn">view_colour</span></a>(rest, <span class="kw">false</span>))
+<a class="ln" id="L112" href="#L112">112</a>    } <span class="kw">else</span> { <a href="#L96"><span class="fn">view_mark</span></a>(t, <span class="str">&quot;operator&quot;</span>, <a href="#L101"><span class="fn">view_colour</span></a>(rest, t.kind == <span class="str">&quot;Lt&quot;</span> || t.kind == <span class="str">&quot;LtSlash&quot;</span>)) }
+<a class="ln" id="L113" href="#L113">113</a>  }
+<a class="ln" id="L114" href="#L114">114</a>}
+<a class="ln" id="L115" href="#L115">115</a>
+<a class="ln" id="L116" href="#L116">116</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">view_tokens</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)): <span class="ty">List</span>(<span class="ty">SynHighlight</span>) ! {div} { <a href="#L101"><span class="fn">view_colour</span></a>(ts, <span class="kw">false</span>) }
+<a class="ln" id="L117" href="#L117">117</a>
+<a class="ln" id="L118" href="#L118">118</a><span class="com">// An element as the formatter lays it out: its name, its attributes as written (`name=value`),</span>
+<a class="ln" id="L119" href="#L119">119</a><span class="com">// and its children, or `None` for `/&gt;`.</span>
+<a class="ln" id="L120" href="#L120">120</a><span class="kw">struct</span> <span class="ty">ViewRead</span> { node: <a href="#L122"><span class="ty">ViewLayout</span></a>, rest: <span class="ty">List</span>(<span class="ty">SynTok</span>) }
+<a class="ln" id="L121" href="#L121">121</a>
+<a class="ln" id="L122" href="#L122">122</a><span class="kw">enum</span> <span class="ty">ViewLayout</span> {
+<a class="ln" id="L123" href="#L123">123</a>  <span class="ty">LayEl</span>(<span class="ty">Text</span>, <span class="ty">List</span>(<span class="ty">Text</span>), <span class="ty">Option</span>(<span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>)))
+<a class="ln" id="L124" href="#L124">124</a>  <span class="ty">LayLeaf</span>(<span class="ty">Text</span>)
+<a class="ln" id="L125" href="#L125">125</a>  <span class="ty">LayBlock</span>(<span class="ty">Text</span>, <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>))
+<a class="ln" id="L126" href="#L126">126</a>  <span class="ty">LayChain</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>, <a href="#L122"><span class="ty">ViewLayout</span></a>)
+<a class="ln" id="L127" href="#L127">127</a>}
+<a class="ln" id="L128" href="#L128">128</a>
+<a class="ln" id="L129" href="#L129">129</a><span class="kw">fn</span> <span class="fn">view_solid</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)): <span class="ty">List</span>(<span class="ty">SynTok</span>) ! {div} {
+<a class="ln" id="L130" href="#L130">130</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L131" href="#L131">131</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L132" href="#L132">132</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> t.skipped { <a href="#L129"><span class="fn">view_solid</span></a>(rest) } <span class="kw">else</span> { <span class="ty">Cons</span>(t, <a href="#L129"><span class="fn">view_solid</span></a>(rest)) }
+<a class="ln" id="L133" href="#L133">133</a>  }
+<a class="ln" id="L134" href="#L134">134</a>}
+<a class="ln" id="L135" href="#L135">135</a>
+<a class="ln" id="L136" href="#L136">136</a><span class="kw">fn</span> <span class="fn">view_rev</span>(<span class="var">l</span>: <span class="ty">List</span>(<span class="ty">Text</span>), <span class="var">acc</span>: <span class="ty">List</span>(<span class="ty">Text</span>)): <span class="ty">List</span>(<span class="ty">Text</span>) ! {div} {
+<a class="ln" id="L137" href="#L137">137</a>  <span class="kw">match</span> l {
+<a class="ln" id="L138" href="#L138">138</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L139" href="#L139">139</a>    <span class="ty">Cons</span>(x, rest) =&gt; <a href="#L136"><span class="fn">view_rev</span></a>(rest, <span class="ty">Cons</span>(x, acc))
+<a class="ln" id="L140" href="#L140">140</a>  }
+<a class="ln" id="L141" href="#L141">141</a>}
+<a class="ln" id="L142" href="#L142">142</a>
+<a class="ln" id="L143" href="#L143">143</a><span class="kw">fn</span> <span class="fn">view_rev_nodes</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>), <span class="var">acc</span>: <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>)): <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>) ! {div} {
+<a class="ln" id="L144" href="#L144">144</a>  <span class="kw">match</span> l {
+<a class="ln" id="L145" href="#L145">145</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L146" href="#L146">146</a>    <span class="ty">Cons</span>(x, rest) =&gt; <a href="#L143"><span class="fn">view_rev_nodes</span></a>(rest, <span class="ty">Cons</span>(x, acc))
+<a class="ln" id="L147" href="#L147">147</a>  }
+<a class="ln" id="L148" href="#L148">148</a>}
+<a class="ln" id="L149" href="#L149">149</a>
+<a class="ln" id="L150" href="#L150">150</a><span class="com">// `&lt;name attrs (/&gt; | &gt; children &lt;/name&gt;)` from the tokens, with what follows.</span>
+<a class="ln" id="L151" href="#L151">151</a><span class="kw">fn</span> <span class="fn">view_read_element</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)): <span class="ty">Option</span>(<a href="#L120"><span class="ty">ViewRead</span></a>) ! {div, overflow} {
+<a class="ln" id="L152" href="#L152">152</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L153" href="#L153">153</a>    <span class="ty">Cons</span>(lt, <span class="ty">Cons</span>(name, rest)) =&gt; <span class="kw">if</span> lt.kind == <span class="str">&quot;Lt&quot;</span> &amp;&amp; name.kind == <span class="str">&quot;Name&quot;</span> {
+<a class="ln" id="L154" href="#L154">154</a>      <a href="#L238"><span class="fn">view_read_attrs</span></a>(name.text, <span class="ty">Nil</span>, rest)
+<a class="ln" id="L155" href="#L155">155</a>    } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L156" href="#L156">156</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L157" href="#L157">157</a>    <span class="ty">Cons</span>(_, <span class="ty">Nil</span>) =&gt; <span class="ty">None</span>
+<a class="ln" id="L158" href="#L158">158</a>  }
+<a class="ln" id="L159" href="#L159">159</a>}
+<a class="ln" id="L160" href="#L160">160</a>
+<a class="ln" id="L161" href="#L161">161</a><span class="com">// Read a complete child, including directive blocks. Embedded Tauto expressions are opaque.</span>
+<a class="ln" id="L162" href="#L162">162</a><span class="kw">fn</span> <span class="fn">view_read_el</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)): <span class="ty">Option</span>(<a href="#L120"><span class="ty">ViewRead</span></a>) ! {div, overflow} {
+<a class="ln" id="L163" href="#L163">163</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L164" href="#L164">164</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L165" href="#L165">165</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> t.kind == <span class="str">&quot;Lt&quot;</span> { <a href="#L151"><span class="fn">view_read_element</span></a>(ts) } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;FragOpen&quot;</span> {
+<a class="ln" id="L166" href="#L166">166</a>      <a href="#L198"><span class="fn">view_read_parts</span></a>(<span class="str">&quot;fragment&quot;</span>, <span class="str">&quot;&quot;</span>, <span class="ty">Nil</span>, rest)
+<a class="ln" id="L167" href="#L167">167</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;KwIf&quot;</span> || t.kind == <span class="str">&quot;KwFor&quot;</span> || t.kind == <span class="str">&quot;KwMatch&quot;</span> || t.kind == <span class="str">&quot;KwMount&quot;</span> {
+<a class="ln" id="L168" href="#L168">168</a>      <a href="#L189"><span class="fn">view_read_header</span></a>(t.text, rest)
+<a class="ln" id="L169" href="#L169">169</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;Str&quot;</span> || t.kind == <span class="str">&quot;TautoExpr&quot;</span> {
+<a class="ln" id="L170" href="#L170">170</a>      <span class="ty">Some</span>(<span class="ty">ViewRead</span> { node: <a href="#L124"><span class="ty">LayLeaf</span></a>(t.text), rest: rest })
+<a class="ln" id="L171" href="#L171">171</a>    } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L172" href="#L172">172</a>  }
+<a class="ln" id="L173" href="#L173">173</a>}
+<a class="ln" id="L174" href="#L174">174</a>
+<a class="ln" id="L175" href="#L175">175</a><span class="kw">fn</span> <span class="fn">view_header_piece</span>(<span class="var">head</span>: <span class="ty">Text</span>, <span class="var">token</span>: <span class="ty">SynTok</span>): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L176" href="#L176">176</a>  <span class="kw">if</span> head == <span class="str">&quot;&quot;</span> {
+<a class="ln" id="L177" href="#L177">177</a>    token.text
+<a class="ln" id="L178" href="#L178">178</a>  } <span class="kw">else</span> <span class="kw">if</span> token.kind == <span class="str">&quot;LParen&quot;</span> || token.kind == <span class="str">&quot;RParen&quot;</span> || token.kind == <span class="str">&quot;Comma&quot;</span> {
+<a class="ln" id="L179" href="#L179">179</a>    <span class="fn">concat</span>(head, token.text)
+<a class="ln" id="L180" href="#L180">180</a>  } <span class="kw">else</span> <span class="kw">if</span> <span class="fn">Text::slice</span>(head, <span class="fn">Text::len</span>(head) - <span class="num">1</span>, <span class="fn">Text::len</span>(head)) == <span class="ty">Some</span>(<span class="str">&quot;(&quot;</span>) {
+<a class="ln" id="L181" href="#L181">181</a>    <span class="fn">concat</span>(head, token.text)
+<a class="ln" id="L182" href="#L182">182</a>  } <span class="kw">else</span> { <span class="fn">concat</span>(head, <span class="fn">concat</span>(<span class="str">&quot; &quot;</span>, token.text)) }
+<a class="ln" id="L183" href="#L183">183</a>}
+<a class="ln" id="L184" href="#L184">184</a>
+<a class="ln" id="L185" href="#L185">185</a><span class="kw">fn</span> <span class="fn">view_block_open</span>(<span class="var">head</span>: <span class="ty">Text</span>): <span class="ty">Text</span> {
+<a class="ln" id="L186" href="#L186">186</a>  <span class="kw">if</span> head == <span class="str">&quot;&quot;</span> { <span class="str">&quot;{&quot;</span> } <span class="kw">else</span> { <span class="fn">concat</span>(head, <span class="str">&quot; {&quot;</span>) }
+<a class="ln" id="L187" href="#L187">187</a>}
+<a class="ln" id="L188" href="#L188">188</a>
+<a class="ln" id="L189" href="#L189">189</a><span class="kw">fn</span> <span class="fn">view_read_header</span>(<span class="var">head</span>: <span class="ty">Text</span>, <span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)): <span class="ty">Option</span>(<a href="#L120"><span class="ty">ViewRead</span></a>) ! {div, overflow} {
+<a class="ln" id="L190" href="#L190">190</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L191" href="#L191">191</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L192" href="#L192">192</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> t.kind == <span class="str">&quot;LBrace&quot;</span> { <a href="#L198"><span class="fn">view_read_parts</span></a>(<span class="str">&quot;block&quot;</span>, head, <span class="ty">Nil</span>, rest) } <span class="kw">else</span> {
+<a class="ln" id="L193" href="#L193">193</a>      <a href="#L189"><span class="fn">view_read_header</span></a>(<a href="#L175"><span class="fn">view_header_piece</span></a>(head, t), rest)
+<a class="ln" id="L194" href="#L194">194</a>    }
+<a class="ln" id="L195" href="#L195">195</a>  }
+<a class="ln" id="L196" href="#L196">196</a>}
+<a class="ln" id="L197" href="#L197">197</a>
+<a class="ln" id="L198" href="#L198">198</a><span class="kw">fn</span> <span class="fn">view_read_parts</span>(
+<a class="ln" id="L199" href="#L199">199</a>  <span class="var">kind</span>: <span class="ty">Text</span>,
+<a class="ln" id="L200" href="#L200">200</a>  <span class="var">head</span>: <span class="ty">Text</span>,
+<a class="ln" id="L201" href="#L201">201</a>  <span class="var">children</span>: <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>),
+<a class="ln" id="L202" href="#L202">202</a>  <span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)
+<a class="ln" id="L203" href="#L203">203</a>): <span class="ty">Option</span>(<a href="#L120"><span class="ty">ViewRead</span></a>) ! {div, overflow} {
+<a class="ln" id="L204" href="#L204">204</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L205" href="#L205">205</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L206" href="#L206">206</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> (kind == <span class="str">&quot;fragment&quot;</span> &amp;&amp; t.kind == <span class="str">&quot;FragClose&quot;</span>) || (kind == <span class="str">&quot;block&quot;</span> &amp;&amp; t.kind == <span class="str">&quot;RBrace&quot;</span>) {
+<a class="ln" id="L207" href="#L207">207</a>      <span class="kw">let</span> node := <span class="kw">if</span> kind == <span class="str">&quot;fragment&quot;</span> {
+<a class="ln" id="L208" href="#L208">208</a>        <a href="#L123"><span class="ty">LayEl</span></a>(<span class="str">&quot;&quot;</span>, <span class="ty">Nil</span>, <span class="ty">Some</span>(<a href="#L143"><span class="fn">view_rev_nodes</span></a>(children, <span class="ty">Nil</span>)))
+<a class="ln" id="L209" href="#L209">209</a>      } <span class="kw">else</span> { <a href="#L125"><span class="ty">LayBlock</span></a>(head, <a href="#L143"><span class="fn">view_rev_nodes</span></a>(children, <span class="ty">Nil</span>)) }
+<a class="ln" id="L210" href="#L210">210</a>      <span class="kw">match</span> rest {
+<a class="ln" id="L211" href="#L211">211</a>        <span class="ty">Cons</span>(other, more) =&gt; <span class="kw">if</span> kind == <span class="str">&quot;block&quot;</span> &amp;&amp; other.kind == <span class="str">&quot;KwElse&quot;</span> {
+<a class="ln" id="L212" href="#L212">212</a>          <span class="kw">let</span> branch := <span class="kw">match</span> more {
+<a class="ln" id="L213" href="#L213">213</a>            <span class="ty">Cons</span>(next, _) =&gt; <span class="kw">if</span> next.kind == <span class="str">&quot;KwIf&quot;</span> { <a href="#L162"><span class="fn">view_read_el</span></a>(more) } <span class="kw">else</span> {
+<a class="ln" id="L214" href="#L214">214</a>              <a href="#L189"><span class="fn">view_read_header</span></a>(<span class="str">&quot;&quot;</span>, more)
+<a class="ln" id="L215" href="#L215">215</a>            }
+<a class="ln" id="L216" href="#L216">216</a>            <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L217" href="#L217">217</a>          }
+<a class="ln" id="L218" href="#L218">218</a>          <span class="kw">match</span> branch {
+<a class="ln" id="L219" href="#L219">219</a>            <span class="ty">Some</span>(b) =&gt; <span class="ty">Some</span>(<span class="ty">ViewRead</span> { node: <a href="#L126"><span class="ty">LayChain</span></a>(node, b.node), rest: b.rest })
+<a class="ln" id="L220" href="#L220">220</a>            <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L221" href="#L221">221</a>          }
+<a class="ln" id="L222" href="#L222">222</a>        } <span class="kw">else</span> { <span class="ty">Some</span>(<span class="ty">ViewRead</span> { node: node, rest: rest }) }
+<a class="ln" id="L223" href="#L223">223</a>        <span class="ty">Nil</span> =&gt; <span class="ty">Some</span>(<span class="ty">ViewRead</span> { node: node, rest: rest })
+<a class="ln" id="L224" href="#L224">224</a>      }
+<a class="ln" id="L225" href="#L225">225</a>    } <span class="kw">else</span> {
+<a class="ln" id="L226" href="#L226">226</a>      <span class="kw">let</span> child := <a href="#L162"><span class="fn">view_read_el</span></a>(ts)
+<a class="ln" id="L227" href="#L227">227</a>      <span class="com">// A match arm has a pattern header followed by a block.</span>
+<a class="ln" id="L228" href="#L228">228</a>      <span class="kw">let</span> next := <span class="kw">match</span> child { <span class="ty">Some</span>(c) =&gt; <span class="ty">Some</span>(c)
+<a class="ln" id="L229" href="#L229">229</a>        <span class="ty">None</span> =&gt; <span class="kw">if</span> kind == <span class="str">&quot;block&quot;</span> { <a href="#L189"><span class="fn">view_read_header</span></a>(<span class="str">&quot;&quot;</span>, ts) } <span class="kw">else</span> { <span class="ty">None</span> } }
+<a class="ln" id="L230" href="#L230">230</a>      <span class="kw">match</span> next {
+<a class="ln" id="L231" href="#L231">231</a>        <span class="ty">Some</span>(c) =&gt; <a href="#L198"><span class="fn">view_read_parts</span></a>(kind, head, <span class="ty">Cons</span>(c.node, children), c.rest)
+<a class="ln" id="L232" href="#L232">232</a>        <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L233" href="#L233">233</a>      }
+<a class="ln" id="L234" href="#L234">234</a>    }
+<a class="ln" id="L235" href="#L235">235</a>  }
+<a class="ln" id="L236" href="#L236">236</a>}
+<a class="ln" id="L237" href="#L237">237</a>
+<a class="ln" id="L238" href="#L238">238</a><span class="kw">fn</span> <span class="fn">view_read_attrs</span>(
+<a class="ln" id="L239" href="#L239">239</a>  <span class="var">name</span>: <span class="ty">Text</span>,
+<a class="ln" id="L240" href="#L240">240</a>  <span class="var">attrs</span>: <span class="ty">List</span>(<span class="ty">Text</span>),
+<a class="ln" id="L241" href="#L241">241</a>  <span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)
+<a class="ln" id="L242" href="#L242">242</a>): <span class="ty">Option</span>(<a href="#L120"><span class="ty">ViewRead</span></a>) ! {div, overflow} {
+<a class="ln" id="L243" href="#L243">243</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L244" href="#L244">244</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L245" href="#L245">245</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> t.kind == <span class="str">&quot;SlashGt&quot;</span> {
+<a class="ln" id="L246" href="#L246">246</a>      <span class="ty">Some</span>(<span class="ty">ViewRead</span> { node: <a href="#L123"><span class="ty">LayEl</span></a>(name, <a href="#L136"><span class="fn">view_rev</span></a>(attrs, <span class="ty">Nil</span>), <span class="ty">None</span>), rest: rest })
+<a class="ln" id="L247" href="#L247">247</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;Gt&quot;</span> {
+<a class="ln" id="L248" href="#L248">248</a>      <a href="#L262"><span class="fn">view_read_children</span></a>(name, <a href="#L136"><span class="fn">view_rev</span></a>(attrs, <span class="ty">Nil</span>), <span class="ty">Nil</span>, rest)
+<a class="ln" id="L249" href="#L249">249</a>    } <span class="kw">else</span> <span class="kw">if</span> t.kind == <span class="str">&quot;Name&quot;</span> {
+<a class="ln" id="L250" href="#L250">250</a>      <span class="kw">match</span> rest {
+<a class="ln" id="L251" href="#L251">251</a>        <span class="ty">Cons</span>(eq, <span class="ty">Cons</span>(v, more)) =&gt; <span class="kw">if</span> eq.kind == <span class="str">&quot;Equals&quot;</span> {
+<a class="ln" id="L252" href="#L252">252</a>          <a href="#L238"><span class="fn">view_read_attrs</span></a>(name, <span class="ty">Cons</span>(<span class="fn">concat</span>(t.text, <span class="fn">concat</span>(<span class="str">&quot;=&quot;</span>, v.text)), attrs), more)
+<a class="ln" id="L253" href="#L253">253</a>        } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L254" href="#L254">254</a>        <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L255" href="#L255">255</a>        <span class="ty">Cons</span>(_, <span class="ty">Nil</span>) =&gt; <span class="ty">None</span>
+<a class="ln" id="L256" href="#L256">256</a>      }
+<a class="ln" id="L257" href="#L257">257</a>    } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L258" href="#L258">258</a>  }
+<a class="ln" id="L259" href="#L259">259</a>}
+<a class="ln" id="L260" href="#L260">260</a>
+<a class="ln" id="L261" href="#L261">261</a><span class="com">// A `&lt;/name&gt;` that closes another element is the macro's error; the formatter leaves it be.</span>
+<a class="ln" id="L262" href="#L262">262</a><span class="kw">fn</span> <span class="fn">view_read_children</span>(
+<a class="ln" id="L263" href="#L263">263</a>  <span class="var">name</span>: <span class="ty">Text</span>,
+<a class="ln" id="L264" href="#L264">264</a>  <span class="var">attrs</span>: <span class="ty">List</span>(<span class="ty">Text</span>),
+<a class="ln" id="L265" href="#L265">265</a>  <span class="var">children</span>: <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>),
+<a class="ln" id="L266" href="#L266">266</a>  <span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>)
+<a class="ln" id="L267" href="#L267">267</a>): <span class="ty">Option</span>(<a href="#L120"><span class="ty">ViewRead</span></a>) ! {div, overflow} {
+<a class="ln" id="L268" href="#L268">268</a>  <span class="kw">match</span> ts {
+<a class="ln" id="L269" href="#L269">269</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L270" href="#L270">270</a>    <span class="ty">Cons</span>(t, rest) =&gt; <span class="kw">if</span> t.kind == <span class="str">&quot;LtSlash&quot;</span> {
+<a class="ln" id="L271" href="#L271">271</a>      <span class="kw">match</span> rest {
+<a class="ln" id="L272" href="#L272">272</a>        <span class="ty">Cons</span>(close, <span class="ty">Cons</span>(gt, more)) =&gt; <span class="kw">if</span> close.kind == <span class="str">&quot;Name&quot;</span> &amp;&amp; gt.kind == <span class="str">&quot;Gt&quot;</span> &amp;&amp; close.text == name {
+<a class="ln" id="L273" href="#L273">273</a>          <span class="ty">Some</span>(
+<a class="ln" id="L274" href="#L274">274</a>            <span class="ty">ViewRead</span> { node: <a href="#L123"><span class="ty">LayEl</span></a>(name, attrs, <span class="ty">Some</span>(<a href="#L143"><span class="fn">view_rev_nodes</span></a>(children, <span class="ty">Nil</span>))), rest: more }
+<a class="ln" id="L275" href="#L275">275</a>          )
+<a class="ln" id="L276" href="#L276">276</a>        } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L277" href="#L277">277</a>        <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L278" href="#L278">278</a>        <span class="ty">Cons</span>(_, <span class="ty">Nil</span>) =&gt; <span class="ty">None</span>
+<a class="ln" id="L279" href="#L279">279</a>      }
+<a class="ln" id="L280" href="#L280">280</a>    } <span class="kw">else</span> {
+<a class="ln" id="L281" href="#L281">281</a>      <span class="kw">match</span> <a href="#L162"><span class="fn">view_read_el</span></a>(ts) {
+<a class="ln" id="L282" href="#L282">282</a>        <span class="ty">Some</span>(r) =&gt; <a href="#L262"><span class="fn">view_read_children</span></a>(name, attrs, <span class="ty">Cons</span>(r.node, children), r.rest)
+<a class="ln" id="L283" href="#L283">283</a>        <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L284" href="#L284">284</a>      }
+<a class="ln" id="L285" href="#L285">285</a>    }
+<a class="ln" id="L286" href="#L286">286</a>  }
+<a class="ln" id="L287" href="#L287">287</a>}
+<a class="ln" id="L288" href="#L288">288</a>
+<a class="ln" id="L289" href="#L289">289</a><span class="kw">fn</span> <span class="fn">view_join</span>(<span class="var">l</span>: <span class="ty">List</span>(<span class="ty">Text</span>), <span class="var">sep</span>: <span class="ty">Text</span>): <span class="ty">Text</span> ! {div} {
+<a class="ln" id="L290" href="#L290">290</a>  <span class="kw">match</span> l {
+<a class="ln" id="L291" href="#L291">291</a>    <span class="ty">Nil</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L292" href="#L292">292</a>    <span class="ty">Cons</span>(x, <span class="ty">Nil</span>) =&gt; x
+<a class="ln" id="L293" href="#L293">293</a>    <span class="ty">Cons</span>(x, rest) =&gt; <span class="fn">concat</span>(x, <span class="fn">concat</span>(sep, <a href="#L289"><span class="fn">view_join</span></a>(rest, sep)))
+<a class="ln" id="L294" href="#L294">294</a>  }
+<a class="ln" id="L295" href="#L295">295</a>}
+<a class="ln" id="L296" href="#L296">296</a>
+<a class="ln" id="L297" href="#L297">297</a><span class="kw">fn</span> <span class="fn">view_open_flat</span>(<span class="var">name</span>: <span class="ty">Text</span>, <span class="var">attrs</span>: <span class="ty">List</span>(<span class="ty">Text</span>)): <span class="ty">Text</span> ! {div} {
+<a class="ln" id="L298" href="#L298">298</a>  <span class="kw">match</span> attrs {
+<a class="ln" id="L299" href="#L299">299</a>    <span class="ty">Nil</span> =&gt; <span class="fn">concat</span>(<span class="str">&quot;&lt;&quot;</span>, name)
+<a class="ln" id="L300" href="#L300">300</a>    <span class="ty">Cons</span>(_, _) =&gt; <span class="fn">concat</span>(<span class="str">&quot;&lt;&quot;</span>, <span class="fn">concat</span>(name, <span class="fn">concat</span>(<span class="str">&quot; &quot;</span>, <a href="#L289"><span class="fn">view_join</span></a>(attrs, <span class="str">&quot; &quot;</span>))))
+<a class="ln" id="L301" href="#L301">301</a>  }
+<a class="ln" id="L302" href="#L302">302</a>}
+<a class="ln" id="L303" href="#L303">303</a>
+<a class="ln" id="L304" href="#L304">304</a><span class="kw">fn</span> <span class="fn">view_flat</span>(<span class="var">n</span>: <a href="#L122"><span class="ty">ViewLayout</span></a>): <span class="ty">Text</span> ! {div} {
+<a class="ln" id="L305" href="#L305">305</a>  <span class="kw">match</span> n {
+<a class="ln" id="L306" href="#L306">306</a>    <span class="ty">LayLeaf</span>(t) =&gt; t
+<a class="ln" id="L307" href="#L307">307</a>    <span class="ty">LayBlock</span>(head, children) =&gt; <span class="kw">match</span> children {
+<a class="ln" id="L308" href="#L308">308</a>      <span class="ty">Nil</span> =&gt; <span class="fn">concat</span>(<a href="#L185"><span class="fn">view_block_open</span></a>(head), <span class="str">&quot;}&quot;</span>)
+<a class="ln" id="L309" href="#L309">309</a>      <span class="ty">Cons</span>(_, _) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L310" href="#L310">310</a>        <a href="#L185"><span class="fn">view_block_open</span></a>(head),
+<a class="ln" id="L311" href="#L311">311</a>        <span class="fn">concat</span>(<span class="str">&quot; &quot;</span>, <span class="fn">concat</span>(<a href="#L289"><span class="fn">view_join</span></a>(<a href="#L323"><span class="fn">view_flats</span></a>(children), <span class="str">&quot; &quot;</span>), <span class="str">&quot; }&quot;</span>))
+<a class="ln" id="L312" href="#L312">312</a>      )
+<a class="ln" id="L313" href="#L313">313</a>    }
+<a class="ln" id="L314" href="#L314">314</a>    <span class="ty">LayChain</span>(first, second) =&gt; <span class="fn">concat</span>(<a href="#L304"><span class="fn">view_flat</span></a>(first), <span class="fn">concat</span>(<span class="str">&quot; @else &quot;</span>, <a href="#L304"><span class="fn">view_flat</span></a>(second)))
+<a class="ln" id="L315" href="#L315">315</a>    <span class="ty">LayEl</span>(name, attrs, <span class="ty">None</span>) =&gt; <span class="fn">concat</span>(<a href="#L297"><span class="fn">view_open_flat</span></a>(name, attrs), <span class="str">&quot;/&gt;&quot;</span>)
+<a class="ln" id="L316" href="#L316">316</a>    <span class="ty">LayEl</span>(name, attrs, <span class="ty">Some</span>(children)) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L317" href="#L317">317</a>      <a href="#L297"><span class="fn">view_open_flat</span></a>(name, attrs),
+<a class="ln" id="L318" href="#L318">318</a>      <span class="fn">concat</span>(<span class="str">&quot;&gt;&quot;</span>, <span class="fn">concat</span>(<a href="#L289"><span class="fn">view_join</span></a>(<a href="#L323"><span class="fn">view_flats</span></a>(children), <span class="str">&quot; &quot;</span>), <span class="fn">concat</span>(<span class="str">&quot;&lt;/&quot;</span>, <span class="fn">concat</span>(name, <span class="str">&quot;&gt;&quot;</span>))))
+<a class="ln" id="L319" href="#L319">319</a>    )
+<a class="ln" id="L320" href="#L320">320</a>  }
+<a class="ln" id="L321" href="#L321">321</a>}
+<a class="ln" id="L322" href="#L322">322</a>
+<a class="ln" id="L323" href="#L323">323</a><span class="kw">fn</span> <span class="fn">view_flats</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>)): <span class="ty">List</span>(<span class="ty">Text</span>) ! {div} {
+<a class="ln" id="L324" href="#L324">324</a>  <span class="kw">match</span> l {
+<a class="ln" id="L325" href="#L325">325</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L326" href="#L326">326</a>    <span class="ty">Cons</span>(n, rest) =&gt; <span class="ty">Cons</span>(<a href="#L304"><span class="fn">view_flat</span></a>(n), <a href="#L323"><span class="fn">view_flats</span></a>(rest))
+<a class="ln" id="L327" href="#L327">327</a>  }
+<a class="ln" id="L328" href="#L328">328</a>}
+<a class="ln" id="L329" href="#L329">329</a>
+<a class="ln" id="L330" href="#L330">330</a><span class="kw">fn</span> <span class="fn">view_has_newline</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">i</span>: u64): <span class="ty">Bool</span> ! {div, overflow} {
+<a class="ln" id="L331" href="#L331">331</a>  <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L332" href="#L332">332</a>    <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L333" href="#L333">333</a>    <span class="ty">Some</span>(b) =&gt; <span class="fn">U64::of_u8</span>(b) == <span class="num">10</span> || <a href="#L330"><span class="fn">view_has_newline</span></a>(t, i + <span class="num">1</span>)
+<a class="ln" id="L334" href="#L334">334</a>  }
+<a class="ln" id="L335" href="#L335">335</a>}
+<a class="ln" id="L336" href="#L336">336</a>
+<a class="ln" id="L337" href="#L337">337</a><span class="kw">fn</span> <span class="fn">view_fits</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">col</span>: u64, <span class="var">width</span>: u64): <span class="ty">Bool</span> ! {div, overflow} {
+<a class="ln" id="L338" href="#L338">338</a>  <span class="fn">not</span>(<a href="#L330"><span class="fn">view_has_newline</span></a>(t, <span class="num">0</span>)) &amp;&amp; col + <span class="fn">Text::len</span>(t) &lt;= width
+<a class="ln" id="L339" href="#L339">339</a>}
+<a class="ln" id="L340" href="#L340">340</a>
+<a class="ln" id="L341" href="#L341">341</a><span class="kw">fn</span> <span class="fn">view_spaces</span>(<span class="var">n</span>: u64): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L342" href="#L342">342</a>  <span class="kw">if</span> n == <span class="num">0</span> { <span class="str">&quot;&quot;</span> } <span class="kw">else</span> { <span class="fn">concat</span>(<span class="str">&quot; &quot;</span>, <a href="#L341"><span class="fn">view_spaces</span></a>(n - <span class="num">1</span>)) }
+<a class="ln" id="L343" href="#L343">343</a>}
+<a class="ln" id="L344" href="#L344">344</a>
+<a class="ln" id="L345" href="#L345">345</a><span class="com">// An element whose first line starts at `col` and whose other lines at `indent`: on one line if</span>
+<a class="ln" id="L346" href="#L346">346</a><span class="com">// it fits, else its attributes and its children each on a line of their own, two spaces in.</span>
+<a class="ln" id="L347" href="#L347">347</a><span class="kw">fn</span> <span class="fn">view_lay</span>(<span class="var">n</span>: <a href="#L122"><span class="ty">ViewLayout</span></a>, <span class="var">indent</span>: u64, <span class="var">col</span>: u64, <span class="var">width</span>: u64): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L348" href="#L348">348</a>  <span class="kw">let</span> flat := <a href="#L304"><span class="fn">view_flat</span></a>(n)
+<a class="ln" id="L349" href="#L349">349</a>  <span class="kw">if</span> <a href="#L337"><span class="fn">view_fits</span></a>(flat, col, width) { flat } <span class="kw">else</span> {
+<a class="ln" id="L350" href="#L350">350</a>    <span class="kw">match</span> n {
+<a class="ln" id="L351" href="#L351">351</a>      <span class="ty">LayLeaf</span>(t) =&gt; t
+<a class="ln" id="L352" href="#L352">352</a>      <span class="ty">LayBlock</span>(head, children) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L353" href="#L353">353</a>        <a href="#L185"><span class="fn">view_block_open</span></a>(head),
+<a class="ln" id="L354" href="#L354">354</a>        <span class="fn">concat</span>(
+<a class="ln" id="L355" href="#L355">355</a>          <a href="#L388"><span class="fn">view_lay_children</span></a>(children, indent + <span class="num">2</span>, width),
+<a class="ln" id="L356" href="#L356">356</a>          <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;\n&quot;</span>, <a href="#L341"><span class="fn">view_spaces</span></a>(indent)), <span class="str">&quot;}&quot;</span>)
+<a class="ln" id="L357" href="#L357">357</a>        )
+<a class="ln" id="L358" href="#L358">358</a>      )
+<a class="ln" id="L359" href="#L359">359</a>      <span class="ty">LayChain</span>(first, second) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L360" href="#L360">360</a>        <a href="#L347"><span class="fn">view_lay</span></a>(first, indent, col, width),
+<a class="ln" id="L361" href="#L361">361</a>        <span class="fn">concat</span>(<span class="str">&quot; @else &quot;</span>, <a href="#L347"><span class="fn">view_lay</span></a>(second, indent, indent + <span class="num">7</span>, width))
+<a class="ln" id="L362" href="#L362">362</a>      )
+<a class="ln" id="L363" href="#L363">363</a>      <span class="ty">LayEl</span>(name, attrs, rest) =&gt; {
+<a class="ln" id="L364" href="#L364">364</a>        <span class="kw">let</span> inner := <span class="fn">concat</span>(<span class="str">&quot;\n&quot;</span>, <a href="#L341"><span class="fn">view_spaces</span></a>(indent + <span class="num">2</span>))
+<a class="ln" id="L365" href="#L365">365</a>        <span class="kw">let</span> one := <a href="#L297"><span class="fn">view_open_flat</span></a>(name, attrs)
+<a class="ln" id="L366" href="#L366">366</a>        <span class="kw">let</span> open := <span class="kw">if</span> attrs == <span class="ty">Nil</span> || <a href="#L337"><span class="fn">view_fits</span></a>(<span class="fn">concat</span>(one, <span class="str">&quot;/&gt;&quot;</span>), col, width) { one } <span class="kw">else</span> {
+<a class="ln" id="L367" href="#L367">367</a>          <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;&lt;&quot;</span>, name), <span class="fn">concat</span>(inner, <a href="#L289"><span class="fn">view_join</span></a>(attrs, inner)))
+<a class="ln" id="L368" href="#L368">368</a>        }
+<a class="ln" id="L369" href="#L369">369</a>        <span class="kw">match</span> rest {
+<a class="ln" id="L370" href="#L370">370</a>          <span class="ty">None</span> =&gt; <span class="fn">concat</span>(open, <span class="str">&quot;/&gt;&quot;</span>)
+<a class="ln" id="L371" href="#L371">371</a>          <span class="ty">Some</span>(<span class="ty">Nil</span>) =&gt; <span class="fn">concat</span>(open, <span class="fn">concat</span>(<span class="str">&quot;&gt;&lt;/&quot;</span>, <span class="fn">concat</span>(name, <span class="str">&quot;&gt;&quot;</span>)))
+<a class="ln" id="L372" href="#L372">372</a>          <span class="ty">Some</span>(children) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L373" href="#L373">373</a>            open,
+<a class="ln" id="L374" href="#L374">374</a>            <span class="fn">concat</span>(
+<a class="ln" id="L375" href="#L375">375</a>              <span class="str">&quot;&gt;&quot;</span>,
+<a class="ln" id="L376" href="#L376">376</a>              <span class="fn">concat</span>(
+<a class="ln" id="L377" href="#L377">377</a>                <a href="#L388"><span class="fn">view_lay_children</span></a>(children, indent + <span class="num">2</span>, width),
+<a class="ln" id="L378" href="#L378">378</a>                <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;\n&quot;</span>, <a href="#L341"><span class="fn">view_spaces</span></a>(indent)), <span class="fn">concat</span>(<span class="str">&quot;&lt;/&quot;</span>, <span class="fn">concat</span>(name, <span class="str">&quot;&gt;&quot;</span>)))
+<a class="ln" id="L379" href="#L379">379</a>              )
+<a class="ln" id="L380" href="#L380">380</a>            )
+<a class="ln" id="L381" href="#L381">381</a>          )
+<a class="ln" id="L382" href="#L382">382</a>        }
+<a class="ln" id="L383" href="#L383">383</a>      }
+<a class="ln" id="L384" href="#L384">384</a>    }
+<a class="ln" id="L385" href="#L385">385</a>  }
+<a class="ln" id="L386" href="#L386">386</a>}
+<a class="ln" id="L387" href="#L387">387</a>
+<a class="ln" id="L388" href="#L388">388</a><span class="kw">fn</span> <span class="fn">view_lay_children</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L122"><span class="ty">ViewLayout</span></a>), <span class="var">indent</span>: u64, <span class="var">width</span>: u64): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L389" href="#L389">389</a>  <span class="kw">match</span> l {
+<a class="ln" id="L390" href="#L390">390</a>    <span class="ty">Nil</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L391" href="#L391">391</a>    <span class="ty">Cons</span>(n, rest) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L392" href="#L392">392</a>      <span class="fn">concat</span>(<span class="str">&quot;\n&quot;</span>, <a href="#L341"><span class="fn">view_spaces</span></a>(indent)),
+<a class="ln" id="L393" href="#L393">393</a>      <span class="fn">concat</span>(<a href="#L347"><span class="fn">view_lay</span></a>(n, indent, indent, width), <a href="#L388"><span class="fn">view_lay_children</span></a>(rest, indent, width))
+<a class="ln" id="L394" href="#L394">394</a>    )
+<a class="ln" id="L395" href="#L395">395</a>  }
+<a class="ln" id="L396" href="#L396">396</a>}
+<a class="ln" id="L397" href="#L397">397</a>
+<a class="ln" id="L398" href="#L398">398</a><span class="kw">fn</span> <span class="fn">view_format</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>), <span class="var">width</span>: u64): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {div, overflow} {
+<a class="ln" id="L399" href="#L399">399</a>  <span class="kw">match</span> <a href="#L129"><span class="fn">view_solid</span></a>(ts) {
+<a class="ln" id="L400" href="#L400">400</a>    <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L401" href="#L401">401</a>    <span class="ty">Cons</span>(first, rest) =&gt; <span class="kw">if</span> first.kind == <span class="str">&quot;TautoExpr&quot;</span> {
+<a class="ln" id="L402" href="#L402">402</a>      <span class="kw">match</span> <a href="#L162"><span class="fn">view_read_el</span></a>(rest) {
+<a class="ln" id="L403" href="#L403">403</a>        <span class="ty">Some</span>(r) =&gt; <span class="kw">if</span> r.rest == <span class="ty">Nil</span> {
+<a class="ln" id="L404" href="#L404">404</a>          <span class="ty">Some</span>(
+<a class="ln" id="L405" href="#L405">405</a>            <span class="fn">concat</span>(first.text, <span class="fn">concat</span>(<span class="str">&quot; &quot;</span>, <a href="#L347"><span class="fn">view_lay</span></a>(r.node, <span class="num">0</span>, <span class="fn">Text::len</span>(first.text) + <span class="num">1</span>, width)))
+<a class="ln" id="L406" href="#L406">406</a>          )
+<a class="ln" id="L407" href="#L407">407</a>        } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L408" href="#L408">408</a>        <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L409" href="#L409">409</a>      }
+<a class="ln" id="L410" href="#L410">410</a>    } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L411" href="#L411">411</a>  }
+<a class="ln" id="L412" href="#L412">412</a>}
+<a class="ln" id="L413" href="#L413">413</a>
+<a class="ln" id="L414" href="#L414">414</a><span class="com">// The tree first and the element after it on the same line.</span>
+<a class="ln" id="L415" href="#L415">415</a><span class="com">// Leave the source as written if the layout exceeds the column counter's range.</span>
+<a class="ln" id="L416" href="#L416">416</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">view_fmt</span>(<span class="var">ts</span>: <span class="ty">List</span>(<span class="ty">SynTok</span>), <span class="var">width</span>: u64): <span class="ty">Option</span>(<span class="ty">Text</span>) ! {div} {
+<a class="ln" id="L417" href="#L417">417</a>  <span class="kw">handle</span> { <a href="#L398"><span class="fn">view_format</span></a>(ts, width) } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; <span class="ty">None</span> }
+<a class="ln" id="L418" href="#L418">418</a>}
+<a class="ln" id="L419" href="#L419">419</a>
+<a class="ln" id="L420" href="#L420">420</a><span class="com">// ---- what the renderers write, checked before the program runs --------------------------------</span>
+<a class="ln" id="L421" href="#L421">421</a><span class="com">// A macro function cannot run `policy.taut`, whose byte values are `Nat`s, so its lists are</span>
+<a class="ln" id="L422" href="#L422">422</a><span class="com">// written here again as texts; a test checks that both say the same.</span>
+<a class="ln" id="L423" href="#L423">423</a>
+<a class="ln" id="L424" href="#L424">424</a><span class="com">// What a renderer says of its elements, for the `view!` the renderer defines: the kind a tag</span>
+<a class="ln" id="L425" href="#L425">425</a><span class="com">// names, the properties its attributes give (the tree is the one the view is built on), and</span>
+<a class="ln" id="L426" href="#L426">426</a><span class="com">// what `${…}` and `@mount` make. The syntax, `@if`, `@for`, `@match` and fragments are the</span>
+<a class="ln" id="L427" href="#L427">427</a><span class="com">// same for every renderer (`View::child`).</span>
+<a class="ln" id="L428" href="#L428">428</a><span class="kw">pub(open)</span> <span class="kw">struct</span> <span class="ty">ViewDialect</span> {
+<a class="ln" id="L429" href="#L429">429</a>  kind: (<span class="var">name</span>: <span class="ty">SynToken</span>) -&gt; <span class="ty">SynExpr</span> ! {macro_error, div, overflow},
+<a class="ln" id="L430" href="#L430">430</a>  attrs: (<span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">view::Attr</span>)) -&gt; <span class="ty">List</span>(<span class="ty">SynExpr</span>) ! {macro_error, div, overflow},
+<a class="ln" id="L431" href="#L431">431</a>  value: (<span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">e</span>: <span class="ty">SynExpr</span>) -&gt; <span class="ty">SynExpr</span> ! {macro_error, div, overflow},
+<a class="ln" id="L432" href="#L432">432</a>  mount: (<span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">m</span>: <span class="ty">view::Mount</span>) -&gt; <span class="ty">SynExpr</span> ! {macro_error, div, overflow},
+<a class="ln" id="L433" href="#L433">433</a>  <span class="com">// `f`, the function of an `@if`, `@for` or `@match` that the renderer runs again when the signals</span>
+<a class="ln" id="L434" href="#L434">434</a>  <span class="com">// it reads change, as a function that runs it with what the view handles (its contexts).</span>
+<a class="ln" id="L435" href="#L435">435</a>  lift: (<span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">f</span>: <span class="ty">SynExpr</span>) -&gt; <span class="ty">SynExpr</span> ! {macro_error, div, overflow},
+<a class="ln" id="L436" href="#L436">436</a>  <span class="com">// `f`, a function that builds a part of an `@if`, `@for` or `@match` later, from the value it</span>
+<a class="ln" id="L437" href="#L437">437</a>  <span class="com">// is given, as a function that builds it with what the view handles.</span>
+<a class="ln" id="L438" href="#L438">438</a>  keep: (<span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">f</span>: <span class="ty">SynExpr</span>) -&gt; <span class="ty">SynExpr</span> ! {macro_error, div, overflow}
+<a class="ln" id="L439" href="#L439">439</a>}
+<a class="ln" id="L440" href="#L440">440</a>
+<a class="ln" id="L441" href="#L441">441</a><span class="kw">pub</span> <span class="kw">module</span> <span class="ty">View</span> {
+<a class="ln" id="L442" href="#L442">442</a>
+<a class="ln" id="L443" href="#L443">443</a>  <span class="com">// The text of a quoted token, without its quotes.</span>
+<a class="ln" id="L444" href="#L444">444</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">unquote</span>(<span class="var">tok</span>: <span class="ty">SynToken</span>): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L445" href="#L445">445</a>    <span class="kw">match</span> <span class="fn">Text::slice</span>(tok.text, <span class="num">1</span>, <span class="fn">Text::len</span>(tok.text) - <span class="num">1</span>) {
+<a class="ln" id="L446" href="#L446">446</a>      <span class="ty">Some</span>(t) =&gt; t
+<a class="ln" id="L447" href="#L447">447</a>      <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L448" href="#L448">448</a>    }
+<a class="ln" id="L449" href="#L449">449</a>  }
+<a class="ln" id="L450" href="#L450">450</a>
+<a class="ln" id="L451" href="#L451">451</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">list</span>(<span class="var">xs</span>: <span class="ty">List</span>(<span class="ty">SynExpr</span>)): <span class="ty">SynExpr</span> ! {div} {
+<a class="ln" id="L452" href="#L452">452</a>    <span class="kw">match</span> xs {
+<a class="ln" id="L453" href="#L453">453</a>      <span class="ty">Nil</span> =&gt; <span class="kw">quote</span> { <span class="ty">Nil</span> }
+<a class="ln" id="L454" href="#L454">454</a>      <span class="ty">Cons</span>(x, rest) =&gt; {
+<a class="ln" id="L455" href="#L455">455</a>        <span class="kw">let</span> tail := <a href="#L451"><span class="fn">View::list</span></a>(rest)
+<a class="ln" id="L456" href="#L456">456</a>        <span class="kw">quote</span> { <span class="ty">Cons</span>($x, $tail) }
+<a class="ln" id="L457" href="#L457">457</a>      }
+<a class="ln" id="L458" href="#L458">458</a>    }
+<a class="ln" id="L459" href="#L459">459</a>  }
+<a class="ln" id="L460" href="#L460">460</a>
+<a class="ln" id="L461" href="#L461">461</a>  <span class="com">// The event `on:&lt;name&gt;` names.</span>
+<a class="ln" id="L462" href="#L462">462</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">event</span>(<span class="var">at</span>: <span class="ty">SynSpan</span>, <span class="var">name</span>: <span class="ty">Text</span>): <span class="ty">SynExpr</span> ! {macro_error, div} {
+<a class="ln" id="L463" href="#L463">463</a>    <span class="kw">if</span> <span class="fn">Text::slice</span>(name, <span class="num">0</span>, <span class="num">7</span>) == <span class="ty">Some</span>(<span class="str">&quot;action:&quot;</span>) {
+<a class="ln" id="L464" href="#L464">464</a>      <span class="kw">let</span> action := <span class="kw">match</span> <span class="fn">Text::slice</span>(name, <span class="num">7</span>, <span class="fn">Text::len</span>(name)) { <span class="ty">Some</span>(value) =&gt; value
+<a class="ln" id="L465" href="#L465">465</a>        <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span> }
+<a class="ln" id="L466" href="#L466">466</a>      <span class="kw">if</span> action == <span class="str">&quot;&quot;</span> { <span class="fn">Syn::error</span>(at, <span class="str">&quot;on:action takes a name&quot;</span>) } <span class="kw">else</span> {
+<a class="ln" id="L467" href="#L467">467</a>        <span class="kw">let</span> value := <span class="fn">Syn::lift_text</span>(action, at)
+<a class="ln" id="L468" href="#L468">468</a>        <span class="kw">quote</span> { <span class="ty">NamedAction</span>($value) }
+<a class="ln" id="L469" href="#L469">469</a>      }
+<a class="ln" id="L470" href="#L470">470</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;press&quot;</span> { <span class="kw">quote</span> { <span class="ty">Press</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;focus&quot;</span> {
+<a class="ln" id="L471" href="#L471">471</a>      <span class="kw">quote</span> { <span class="ty">Focus</span> }
+<a class="ln" id="L472" href="#L472">472</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;blur&quot;</span> {
+<a class="ln" id="L473" href="#L473">473</a>      <span class="kw">quote</span> { <span class="ty">Blur</span> }
+<a class="ln" id="L474" href="#L474">474</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;key&quot;</span> { <span class="kw">quote</span> { <span class="ty">Key</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;edit&quot;</span> {
+<a class="ln" id="L475" href="#L475">475</a>      <span class="kw">quote</span> { <span class="ty">Edit</span> }
+<a class="ln" id="L476" href="#L476">476</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;scroll&quot;</span> {
+<a class="ln" id="L477" href="#L477">477</a>      <span class="kw">quote</span> { <span class="ty">Scroll</span> }
+<a class="ln" id="L478" href="#L478">478</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;submit&quot;</span> {
+<a class="ln" id="L479" href="#L479">479</a>      <span class="kw">quote</span> { <span class="ty">Submit</span> }
+<a class="ln" id="L480" href="#L480">480</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;pointerdown&quot;</span> { <span class="kw">quote</span> { <span class="ty">PointerDown</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;pointerup&quot;</span> {
+<a class="ln" id="L481" href="#L481">481</a>      <span class="kw">quote</span> { <span class="ty">PointerUp</span> }
+<a class="ln" id="L482" href="#L482">482</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;pointermove&quot;</span> { <span class="kw">quote</span> { <span class="ty">PointerMove</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;pointerenter&quot;</span> {
+<a class="ln" id="L483" href="#L483">483</a>      <span class="kw">quote</span> { <span class="ty">PointerEnter</span> }
+<a class="ln" id="L484" href="#L484">484</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;pointerleave&quot;</span> { <span class="kw">quote</span> { <span class="ty">PointerLeave</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;dragstart&quot;</span> {
+<a class="ln" id="L485" href="#L485">485</a>      <span class="kw">quote</span> { <span class="ty">DragStart</span> }
+<a class="ln" id="L486" href="#L486">486</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;dragmove&quot;</span> { <span class="kw">quote</span> { <span class="ty">DragMove</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;dragend&quot;</span> {
+<a class="ln" id="L487" href="#L487">487</a>      <span class="kw">quote</span> { <span class="ty">DragEnd</span> }
+<a class="ln" id="L488" href="#L488">488</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;drop&quot;</span> { <span class="kw">quote</span> { <span class="ty">Drop</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;keyup&quot;</span> {
+<a class="ln" id="L489" href="#L489">489</a>      <span class="kw">quote</span> { <span class="ty">KeyUp</span> }
+<a class="ln" id="L490" href="#L490">490</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;dblclick&quot;</span> {
+<a class="ln" id="L491" href="#L491">491</a>      <span class="kw">quote</span> { <span class="ty">DoubleClick</span> }
+<a class="ln" id="L492" href="#L492">492</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;contextmenu&quot;</span> { <span class="kw">quote</span> { <span class="ty">ContextMenu</span> } } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;wheel&quot;</span> {
+<a class="ln" id="L493" href="#L493">493</a>      <span class="kw">quote</span> { <span class="ty">Wheel</span> }
+<a class="ln" id="L494" href="#L494">494</a>    } <span class="kw">else</span> <span class="kw">if</span> name == <span class="str">&quot;paste&quot;</span> { <span class="kw">quote</span> { <span class="ty">Paste</span> } } <span class="kw">else</span> {
+<a class="ln" id="L495" href="#L495">495</a>      <span class="fn">Syn::error</span>(at, <span class="fn">concat</span>(<span class="str">&quot;no such event: on:&quot;</span>, name))
+<a class="ln" id="L496" href="#L496">496</a>    }
+<a class="ln" id="L497" href="#L497">497</a>  }
+<a class="ln" id="L498" href="#L498">498</a>
+<a class="ln" id="L499" href="#L499">499</a>  <span class="com">// A handler is `(d: EventData) =&gt; …`, or, when it needs nothing from the event, `() =&gt; …`,</span>
+<a class="ln" id="L500" href="#L500">500</a>  <span class="com">// or, for a handler of committed text (`on:edit`), `(value: Text) =&gt; …`, or of a checkbox's</span>
+<a class="ln" id="L501" href="#L501">501</a>  <span class="com">// state, `(checked: Bool) =&gt; …`: as a function of the event's data.</span>
+<a class="ln" id="L502" href="#L502">502</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">handler_fn</span>(<span class="var">h</span>: <span class="ty">SynExpr</span>): <span class="ty">SynExpr</span> ! {macro_error, div} {
+<a class="ln" id="L503" href="#L503">503</a>    <span class="kw">match</span> h {
+<a class="ln" id="L504" href="#L504">504</a>      <span class="ty">ExLam</span>(<span class="ty">Nil</span>, _, _) =&gt; <span class="kw">quote</span> { (<span class="var">delim_event</span>: <span class="ty">EventData</span>) =&gt; ($h)() }
+<a class="ln" id="L505" href="#L505">505</a>      <span class="ty">ExLam</span>(<span class="ty">Cons</span>(<span class="ty">BName</span>(_, <span class="ty">Some</span>(<span class="ty">ExVar</span>(ty)), _), <span class="ty">Nil</span>), _, _) =&gt; <span class="kw">if</span> ty.name == <span class="str">&quot;Text&quot;</span> {
+<a class="ln" id="L506" href="#L506">506</a>        <span class="kw">quote</span> { (<span class="var">delim_event</span>: <span class="ty">EventData</span>) =&gt; ($h)(<span class="fn">event_text</span>(delim_event)) }
+<a class="ln" id="L507" href="#L507">507</a>      } <span class="kw">else</span> <span class="kw">if</span> ty.name == <span class="str">&quot;Bool&quot;</span> {
+<a class="ln" id="L508" href="#L508">508</a>        <span class="kw">quote</span> { (<span class="var">delim_event</span>: <span class="ty">EventData</span>) =&gt; ($h)(<span class="fn">event_text</span>(delim_event) == <span class="str">&quot;true&quot;</span>) }
+<a class="ln" id="L509" href="#L509">509</a>      } <span class="kw">else</span> { h }
+<a class="ln" id="L510" href="#L510">510</a>      _ =&gt; h
+<a class="ln" id="L511" href="#L511">511</a>    }
+<a class="ln" id="L512" href="#L512">512</a>  }
+<a class="ln" id="L513" href="#L513">513</a>
+<a class="ln" id="L514" href="#L514">514</a>  <span class="com">// The handler `h` of the event `kind`, as the tree keeps it.</span>
+<a class="ln" id="L515" href="#L515">515</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">handler</span>(<span class="var">kind</span>: <span class="ty">SynExpr</span>, <span class="var">h</span>: <span class="ty">SynExpr</span>): <span class="ty">SynExpr</span> ! {macro_error, div} {
+<a class="ln" id="L516" href="#L516">516</a>    <span class="kw">let</span> f := <a href="#L502"><span class="fn">View::handler_fn</span></a>(h)
+<a class="ln" id="L517" href="#L517">517</a>    <span class="kw">quote</span> { <span class="ty">On</span>($kind, $f) }
+<a class="ln" id="L518" href="#L518">518</a>  }
+<a class="ln" id="L519" href="#L519">519</a>
+<a class="ln" id="L520" href="#L520">520</a>  <span class="kw">fn</span> <span class="fn">children</span>(
+<a class="ln" id="L521" href="#L521">521</a>    <span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>,
+<a class="ln" id="L522" href="#L522">522</a>    <span class="var">t</span>: <span class="ty">SynExpr</span>,
+<a class="ln" id="L523" href="#L523">523</a>    <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">view::Child</span>)
+<a class="ln" id="L524" href="#L524">524</a>  ): <span class="ty">List</span>(<span class="ty">SynExpr</span>) ! {macro_error, div, overflow} {
+<a class="ln" id="L525" href="#L525">525</a>    <span class="kw">match</span> l {
+<a class="ln" id="L526" href="#L526">526</a>      <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L527" href="#L527">527</a>      <span class="ty">Cons</span>(c, rest) =&gt; <span class="ty">Cons</span>(<a href="#L643"><span class="fn">View::child</span></a>(d, t, c), <span class="fn">View::children</span>(d, t, rest))
+<a class="ln" id="L528" href="#L528">528</a>    }
+<a class="ln" id="L529" href="#L529">529</a>  }
+<a class="ln" id="L530" href="#L530">530</a>
+<a class="ln" id="L531" href="#L531">531</a>  <span class="kw">fn</span> <span class="fn">group</span>(
+<a class="ln" id="L532" href="#L532">532</a>    <span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>,
+<a class="ln" id="L533" href="#L533">533</a>    <span class="var">t</span>: <span class="ty">SynExpr</span>,
+<a class="ln" id="L534" href="#L534">534</a>    <span class="var">children</span>: <span class="ty">List</span>(<span class="ty">view::Child</span>)
+<a class="ln" id="L535" href="#L535">535</a>  ): <span class="ty">SynExpr</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L536" href="#L536">536</a>    <span class="kw">let</span> nodes := <a href="#L451"><span class="fn">View::list</span></a>(<span class="fn">View::children</span>(d, t, children))
+<a class="ln" id="L537" href="#L537">537</a>    <span class="kw">quote</span> { <span class="fn">fragment</span>($t, $nodes) }
+<a class="ln" id="L538" href="#L538">538</a>  }
+<a class="ln" id="L539" href="#L539">539</a>
+<a class="ln" id="L540" href="#L540">540</a>  <span class="kw">fn</span> <span class="fn">block</span>(<span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>, <span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">b</span>: <span class="ty">view::Block</span>): <span class="ty">SynExpr</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L541" href="#L541">541</a>    <span class="kw">match</span> b.child {
+<a class="ln" id="L542" href="#L542">542</a>      <span class="ty">Cons</span>(child, <span class="ty">Nil</span>) =&gt; <a href="#L643"><span class="fn">View::child</span></a>(d, t, child)
+<a class="ln" id="L543" href="#L543">543</a>      <span class="ty">Nil</span> =&gt; <span class="fn">View::group</span>(d, t, <span class="ty">Nil</span>)
+<a class="ln" id="L544" href="#L544">544</a>      <span class="ty">Cons</span>(first, <span class="ty">Cons</span>(second, more)) =&gt; <span class="fn">View::group</span>(d, t, <span class="ty">Cons</span>(first, <span class="ty">Cons</span>(second, more)))
+<a class="ln" id="L545" href="#L545">545</a>    }
+<a class="ln" id="L546" href="#L546">546</a>  }
+<a class="ln" id="L547" href="#L547">547</a>
+<a class="ln" id="L548" href="#L548">548</a>  <span class="kw">fn</span> <span class="fn">conditional</span>(
+<a class="ln" id="L549" href="#L549">549</a>    <span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>,
+<a class="ln" id="L550" href="#L550">550</a>    <span class="var">t</span>: <span class="ty">SynExpr</span>,
+<a class="ln" id="L551" href="#L551">551</a>    <span class="var">c</span>: <span class="ty">view::Conditional</span>
+<a class="ln" id="L552" href="#L552">552</a>  ): <span class="ty">SynExpr</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L553" href="#L553">553</a>    <span class="kw">let</span> e := c.tauto_expr
+<a class="ln" id="L554" href="#L554">554</a>    <span class="kw">let</span> cond := (d.lift)(t, <span class="kw">quote</span> { () =&gt; $e })
+<a class="ln" id="L555" href="#L555">555</a>    <span class="kw">let</span> yes := <span class="fn">View::block</span>(d, t, c.block)
+<a class="ln" id="L556" href="#L556">556</a>    <span class="kw">match</span> c.otherwise {
+<a class="ln" id="L557" href="#L557">557</a>      <span class="ty">None</span> =&gt; {
+<a class="ln" id="L558" href="#L558">558</a>        <span class="kw">let</span> build := (d.lift)(t, <span class="kw">quote</span> { () =&gt; $yes })
+<a class="ln" id="L559" href="#L559">559</a>        <span class="kw">quote</span> { <span class="fn">show</span>($t, $cond, $build) }
+<a class="ln" id="L560" href="#L560">560</a>      }
+<a class="ln" id="L561" href="#L561">561</a>      <span class="ty">Some</span>(other) =&gt; {
+<a class="ln" id="L562" href="#L562">562</a>        <span class="kw">let</span> no := <span class="kw">match</span> other.else_body {
+<a class="ln" id="L563" href="#L563">563</a>          <span class="ty">Block</span>(b) =&gt; <span class="fn">View::block</span>(d, t, b)
+<a class="ln" id="L564" href="#L564">564</a>          <span class="ty">Conditional</span>(nested) =&gt; <span class="fn">View::conditional</span>(d, t, nested)
+<a class="ln" id="L565" href="#L565">565</a>        }
+<a class="ln" id="L566" href="#L566">566</a>        <span class="kw">let</span> build := (d.keep)(t, <span class="kw">quote</span> { (<span class="var">value</span>: <span class="ty">Bool</span>) =&gt; <span class="kw">if</span> value { $yes } <span class="kw">else</span> { $no } })
+<a class="ln" id="L567" href="#L567">567</a>        <span class="kw">quote</span> { <span class="fn">switch_on</span>($t, $cond, $build) }
+<a class="ln" id="L568" href="#L568">568</a>      }
+<a class="ln" id="L569" href="#L569">569</a>    }
+<a class="ln" id="L570" href="#L570">570</a>  }
+<a class="ln" id="L571" href="#L571">571</a>
+<a class="ln" id="L572" href="#L572">572</a>  <span class="kw">fn</span> <span class="fn">constructor_name</span>(<span class="var">name</span>: <span class="ty">Text</span>, <span class="var">index</span>: u64): <span class="ty">Bool</span> ! {div, overflow} {
+<a class="ln" id="L573" href="#L573">573</a>    <span class="kw">match</span> <span class="fn">Text::byte</span>(name, index) {
+<a class="ln" id="L574" href="#L574">574</a>      <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L575" href="#L575">575</a>      <span class="ty">Some</span>(b) =&gt; (
+<a class="ln" id="L576" href="#L576">576</a>        index == <span class="num">0</span> &amp;&amp; <span class="fn">U64::of_u8</span>(b) &gt;= <span class="num">65</span> &amp;&amp; <span class="fn">U64::of_u8</span>(b) &lt;= <span class="num">90</span>
+<a class="ln" id="L577" href="#L577">577</a>      ) || <span class="fn">U64::of_u8</span>(b) == <span class="num">58</span> || <span class="fn">View::constructor_name</span>(name, index + <span class="num">1</span>)
+<a class="ln" id="L578" href="#L578">578</a>    }
+<a class="ln" id="L579" href="#L579">579</a>  }
+<a class="ln" id="L580" href="#L580">580</a>
+<a class="ln" id="L581" href="#L581">581</a>  <span class="kw">fn</span> <span class="fn">pattern</span>(<span class="var">p</span>: <span class="ty">view::Pattern</span>): <span class="ty">SynPattern</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L582" href="#L582">582</a>    <span class="kw">match</span> p {
+<a class="ln" id="L583" href="#L583">583</a>      <span class="ty">TautoExpr</span>(e) =&gt; <span class="fn">View::expr_pattern</span>(e)
+<a class="ln" id="L584" href="#L584">584</a>      <span class="ty">NameOpt</span> { name: tok, pattern_args: args, span: _ } =&gt; {
+<a class="ln" id="L585" href="#L585">585</a>        <span class="kw">let</span> name := <span class="fn">Syn::ident</span>(tok)
+<a class="ln" id="L586" href="#L586">586</a>        <span class="kw">match</span> args {
+<a class="ln" id="L587" href="#L587">587</a>          <span class="ty">Some</span>(a) =&gt; <span class="ty">PtCtor</span>(name, <span class="kw">match</span> a.pattern_list {
+<a class="ln" id="L588" href="#L588">588</a>            <span class="ty">None</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L589" href="#L589">589</a>            <span class="ty">Some</span>(ps) =&gt; <span class="ty">Cons</span>(<span class="fn">View::pattern</span>(ps.pattern), <span class="fn">View::pattern_tail</span>(ps.pattern_tail))
+<a class="ln" id="L590" href="#L590">590</a>          })
+<a class="ln" id="L591" href="#L591">591</a>          <span class="ty">None</span> =&gt; <span class="kw">if</span> tok.text == <span class="str">&quot;_&quot;</span> { <span class="ty">PtWild</span> } <span class="kw">else</span> <span class="kw">if</span> tok.text == <span class="str">&quot;true&quot;</span> {
+<a class="ln" id="L592" href="#L592">592</a>            <span class="ty">PtBool</span>(<span class="kw">true</span>)
+<a class="ln" id="L593" href="#L593">593</a>          } <span class="kw">else</span> <span class="kw">if</span> tok.text == <span class="str">&quot;false&quot;</span> { <span class="ty">PtBool</span>(<span class="kw">false</span>) } <span class="kw">else</span> <span class="kw">if</span> <span class="fn">View::constructor_name</span>(
+<a class="ln" id="L594" href="#L594">594</a>            tok.text,
+<a class="ln" id="L595" href="#L595">595</a>            <span class="num">0</span>
+<a class="ln" id="L596" href="#L596">596</a>          ) { <span class="ty">PtCtor</span>(name, <span class="ty">Nil</span>) } <span class="kw">else</span> { <span class="ty">PtBind</span>(name, <span class="ty">None</span>) }
+<a class="ln" id="L597" href="#L597">597</a>        }
+<a class="ln" id="L598" href="#L598">598</a>      }
+<a class="ln" id="L599" href="#L599">599</a>    }
+<a class="ln" id="L600" href="#L600">600</a>  }
+<a class="ln" id="L601" href="#L601">601</a>
+<a class="ln" id="L602" href="#L602">602</a>  <span class="kw">fn</span> <span class="fn">pattern_tail</span>(<span class="var">ps</span>: <span class="ty">List</span>(<span class="ty">view::PatternTail</span>)): <span class="ty">List</span>(<span class="ty">SynPattern</span>) ! {macro_error, div, overflow} {
+<a class="ln" id="L603" href="#L603">603</a>    <span class="kw">match</span> ps {
+<a class="ln" id="L604" href="#L604">604</a>      <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L605" href="#L605">605</a>      <span class="ty">Cons</span>(p, rest) =&gt; <span class="ty">Cons</span>(<span class="fn">View::pattern</span>(p.pattern), <span class="fn">View::pattern_tail</span>(rest))
+<a class="ln" id="L606" href="#L606">606</a>    }
+<a class="ln" id="L607" href="#L607">607</a>  }
+<a class="ln" id="L608" href="#L608">608</a>
+<a class="ln" id="L609" href="#L609">609</a>  <span class="kw">fn</span> <span class="fn">expr_pattern</span>(<span class="var">e</span>: <span class="ty">SynExpr</span>): <span class="ty">SynPattern</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L610" href="#L610">610</a>    <span class="kw">match</span> e {
+<a class="ln" id="L611" href="#L611">611</a>      <span class="ty">ExVar</span>(n) =&gt; <span class="kw">if</span> n.name == <span class="str">&quot;_&quot;</span> { <span class="ty">PtWild</span> } <span class="kw">else</span> { <span class="ty">PtCtor</span>(n, <span class="ty">Nil</span>) }
+<a class="ln" id="L612" href="#L612">612</a>      <span class="ty">ExBool</span>(b, _) =&gt; <span class="ty">PtBool</span>(b)
+<a class="ln" id="L613" href="#L613">613</a>      <span class="ty">ExText</span>(s, _) =&gt; <span class="ty">PtText</span>(s)
+<a class="ln" id="L614" href="#L614">614</a>      <span class="ty">ExApp</span>(<span class="ty">ExVar</span>(n), args, _) =&gt; <span class="ty">PtCtor</span>(n, <span class="fn">View::expr_patterns</span>(args))
+<a class="ln" id="L615" href="#L615">615</a>      _ =&gt; <span class="fn">Syn::error</span>(<span class="fn">Syn::call_span</span>(), <span class="str">&quot;view! pattern: use a name, constructor, Bool or Text&quot;</span>)
+<a class="ln" id="L616" href="#L616">616</a>    }
+<a class="ln" id="L617" href="#L617">617</a>  }
+<a class="ln" id="L618" href="#L618">618</a>
+<a class="ln" id="L619" href="#L619">619</a>  <span class="kw">fn</span> <span class="fn">expr_patterns</span>(<span class="var">es</span>: <span class="ty">List</span>(<span class="ty">SynExpr</span>)): <span class="ty">List</span>(<span class="ty">SynPattern</span>) ! {macro_error, div, overflow} {
+<a class="ln" id="L620" href="#L620">620</a>    <span class="kw">match</span> es {
+<a class="ln" id="L621" href="#L621">621</a>      <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L622" href="#L622">622</a>      <span class="ty">Cons</span>(<span class="ty">ExVar</span>(n), rest) =&gt; <span class="ty">Cons</span>(
+<a class="ln" id="L623" href="#L623">623</a>        <span class="kw">if</span> n.name == <span class="str">&quot;_&quot;</span> { <span class="ty">PtWild</span> } <span class="kw">else</span> { <span class="ty">PtBind</span>(n, <span class="ty">None</span>) },
+<a class="ln" id="L624" href="#L624">624</a>        <span class="fn">View::expr_patterns</span>(rest)
+<a class="ln" id="L625" href="#L625">625</a>      )
+<a class="ln" id="L626" href="#L626">626</a>      <span class="ty">Cons</span>(e, rest) =&gt; <span class="ty">Cons</span>(<span class="fn">View::expr_pattern</span>(e), <span class="fn">View::expr_patterns</span>(rest))
+<a class="ln" id="L627" href="#L627">627</a>    }
+<a class="ln" id="L628" href="#L628">628</a>  }
+<a class="ln" id="L629" href="#L629">629</a>
+<a class="ln" id="L630" href="#L630">630</a>  <span class="kw">fn</span> <span class="fn">arms</span>(
+<a class="ln" id="L631" href="#L631">631</a>    <span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>,
+<a class="ln" id="L632" href="#L632">632</a>    <span class="var">t</span>: <span class="ty">SynExpr</span>,
+<a class="ln" id="L633" href="#L633">633</a>    <span class="var">xs</span>: <span class="ty">List</span>(<span class="ty">view::Arm</span>)
+<a class="ln" id="L634" href="#L634">634</a>  ): <span class="ty">List</span>(<span class="ty">SynArm</span>) ! {macro_error, div, overflow} {
+<a class="ln" id="L635" href="#L635">635</a>    <span class="kw">match</span> xs {
+<a class="ln" id="L636" href="#L636">636</a>      <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L637" href="#L637">637</a>      <span class="ty">Cons</span>(a, rest) =&gt; <span class="ty">Cons</span>(<span class="ty">SynArm</span> {
+<a class="ln" id="L638" href="#L638">638</a>        pattern: <span class="fn">View::pattern</span>(a.pattern), guard: <span class="ty">None</span>, goal: <span class="ty">None</span>, body: <span class="fn">View::block</span>(d, t, a.block)
+<a class="ln" id="L639" href="#L639">639</a>      }, <span class="fn">View::arms</span>(d, t, rest))
+<a class="ln" id="L640" href="#L640">640</a>    }
+<a class="ln" id="L641" href="#L641">641</a>  }
+<a class="ln" id="L642" href="#L642">642</a>
+<a class="ln" id="L643" href="#L643">643</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">child</span>(<span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>, <span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">c</span>: <span class="ty">view::Child</span>): <span class="ty">SynExpr</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L644" href="#L644">644</a>    <span class="kw">match</span> c {
+<a class="ln" id="L645" href="#L645">645</a>      <span class="ty">Element</span>(e) =&gt; <span class="fn">View::element</span>(d, t, e)
+<a class="ln" id="L646" href="#L646">646</a>      <span class="ty">Fragment</span>(f) =&gt; <span class="fn">View::group</span>(d, t, f.child)
+<a class="ln" id="L647" href="#L647">647</a>      <span class="ty">Conditional</span>(c) =&gt; <span class="fn">View::conditional</span>(d, t, c)
+<a class="ln" id="L648" href="#L648">648</a>      <span class="ty">Each</span>(e) =&gt; {
+<a class="ln" id="L649" href="#L649">649</a>        <span class="kw">if</span> e.in_word.name.text == <span class="str">&quot;in&quot;</span> { #() } <span class="kw">else</span> {
+<a class="ln" id="L650" href="#L650">650</a>          <span class="fn">Syn::error</span>(e.in_word.span, <span class="str">&quot;@for expects `in`&quot;</span>)
+<a class="ln" id="L651" href="#L651">651</a>        }
+<a class="ln" id="L652" href="#L652">652</a>        <span class="kw">if</span> e.key_word.name.text == <span class="str">&quot;key&quot;</span> { #() } <span class="kw">else</span> {
+<a class="ln" id="L653" href="#L653">653</a>          <span class="fn">Syn::error</span>(e.key_word.span, <span class="str">&quot;@for requires `key` and a key function&quot;</span>)
+<a class="ln" id="L654" href="#L654">654</a>        }
+<a class="ln" id="L655" href="#L655">655</a>        <span class="kw">let</span> x := e.tauto_expr
+<a class="ln" id="L656" href="#L656">656</a>        <span class="kw">let</span> items := (d.lift)(t, <span class="kw">quote</span> { () =&gt; $x })
+<a class="ln" id="L657" href="#L657">657</a>        <span class="kw">let</span> key := e.tauto_expr_2
+<a class="ln" id="L658" href="#L658">658</a>        <span class="kw">let</span> body := <span class="fn">View::block</span>(d, t, e.block)
+<a class="ln" id="L659" href="#L659">659</a>        <span class="kw">let</span> row := (d.keep)(t, <span class="ty">ExLam</span>([<span class="ty">BName</span>(<span class="fn">Syn::ident</span>(e.name), <span class="ty">None</span>, <span class="ty">None</span>)], body, e.name.span))
+<a class="ln" id="L660" href="#L660">660</a>        <span class="kw">quote</span> { <span class="fn">keyed_each_signal</span>($t, $items, $key, $row) }
+<a class="ln" id="L661" href="#L661">661</a>      }
+<a class="ln" id="L662" href="#L662">662</a>      <span class="ty">Selection</span>(s) =&gt; {
+<a class="ln" id="L663" href="#L663">663</a>        <span class="kw">let</span> x := s.tauto_expr
+<a class="ln" id="L664" href="#L664">664</a>        <span class="kw">let</span> source := (d.lift)(t, <span class="kw">quote</span> { () =&gt; $x })
+<a class="ln" id="L665" href="#L665">665</a>        <span class="kw">let</span> value := <span class="kw">match</span> <span class="kw">quote</span> { (delim_match_value) =&gt; delim_match_value } {
+<a class="ln" id="L666" href="#L666">666</a>          <span class="ty">ExLam</span>(<span class="ty">Cons</span>(<span class="ty">BName</span>(n, _, _), _), _, _) =&gt; n
+<a class="ln" id="L667" href="#L667">667</a>          _ =&gt; <span class="fn">Syn::error</span>(s.span, <span class="str">&quot;view! could not construct match binder&quot;</span>)
+<a class="ln" id="L668" href="#L668">668</a>        }
+<a class="ln" id="L669" href="#L669">669</a>        <span class="kw">let</span> body := <span class="ty">ExMatch</span>(
+<a class="ln" id="L670" href="#L670">670</a>          <span class="ty">ExVar</span>(value),
+<a class="ln" id="L671" href="#L671">671</a>          <span class="ty">None</span>,
+<a class="ln" id="L672" href="#L672">672</a>          <span class="fn">View::arms</span>(d, t, s.arm),
+<a class="ln" id="L673" href="#L673">673</a>          <span class="ty">None</span>,
+<a class="ln" id="L674" href="#L674">674</a>          <span class="ty">None</span>,
+<a class="ln" id="L675" href="#L675">675</a>          <span class="fn">Syn::call_span</span>()
+<a class="ln" id="L676" href="#L676">676</a>        )
+<a class="ln" id="L677" href="#L677">677</a>        <span class="kw">let</span> build := (d.keep)(t, <span class="ty">ExLam</span>([<span class="ty">BName</span>(value, <span class="ty">None</span>, <span class="ty">None</span>)], body, <span class="fn">Syn::call_span</span>()))
+<a class="ln" id="L678" href="#L678">678</a>        <span class="kw">quote</span> { <span class="fn">switch_on_change</span>($t, $source, $build) }
+<a class="ln" id="L679" href="#L679">679</a>      }
+<a class="ln" id="L680" href="#L680">680</a>      <span class="ty">Str</span>(tok) =&gt; {
+<a class="ln" id="L681" href="#L681">681</a>        <span class="kw">let</span> s := <span class="fn">Syn::lift_text</span>(<a href="#L444"><span class="fn">View::unquote</span></a>(tok), tok.span)
+<a class="ln" id="L682" href="#L682">682</a>        <span class="kw">quote</span> { <span class="fn">text</span>($t, $s) }
+<a class="ln" id="L683" href="#L683">683</a>      }
+<a class="ln" id="L684" href="#L684">684</a>      <span class="ty">Mount</span>(m) =&gt; (d.mount)(t, m)
+<a class="ln" id="L685" href="#L685">685</a>      <span class="ty">TautoExpr</span>(e) =&gt; (d.value)(t, e)
+<a class="ln" id="L686" href="#L686">686</a>    }
+<a class="ln" id="L687" href="#L687">687</a>  }
+<a class="ln" id="L688" href="#L688">688</a>
+<a class="ln" id="L689" href="#L689">689</a>  <span class="kw">fn</span> <span class="fn">element</span>(<span class="var">d</span>: <a href="#L428"><span class="ty">ViewDialect</span></a>, <span class="var">t</span>: <span class="ty">SynExpr</span>, <span class="var">e</span>: <span class="ty">view::Element</span>): <span class="ty">SynExpr</span> ! {macro_error, div, overflow} {
+<a class="ln" id="L690" href="#L690">690</a>    <span class="kw">let</span> kind := (d.kind)(e.name)
+<a class="ln" id="L691" href="#L691">691</a>    <span class="kw">let</span> props := <a href="#L451"><span class="fn">View::list</span></a>((d.attrs)(t, e.attr))
+<a class="ln" id="L692" href="#L692">692</a>    <span class="kw">let</span> children := <span class="kw">match</span> e.rest {
+<a class="ln" id="L693" href="#L693">693</a>      <span class="ty">SlashGt</span>(tok) =&gt; <span class="kw">quote</span> { <span class="ty">Nil</span> }
+<a class="ln" id="L694" href="#L694">694</a>      <span class="ty">Body</span>(b) =&gt; {
+<a class="ln" id="L695" href="#L695">695</a>        <span class="kw">if</span> b.name.text == e.name.text { #() } <span class="kw">else</span> {
+<a class="ln" id="L696" href="#L696">696</a>          <span class="fn">Syn::error</span>(
+<a class="ln" id="L697" href="#L697">697</a>            b.name.span,
+<a class="ln" id="L698" href="#L698">698</a>            <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;`&lt;/&quot;</span>, b.name.text), <span class="fn">concat</span>(<span class="str">&quot;&gt;` closes `&lt;&quot;</span>, <span class="fn">concat</span>(e.name.text, <span class="str">&quot;&gt;`&quot;</span>)))
+<a class="ln" id="L699" href="#L699">699</a>          )
+<a class="ln" id="L700" href="#L700">700</a>        }
+<a class="ln" id="L701" href="#L701">701</a>        <a href="#L451"><span class="fn">View::list</span></a>(<span class="fn">View::children</span>(d, t, b.child))
+<a class="ln" id="L702" href="#L702">702</a>      }
+<a class="ln" id="L703" href="#L703">703</a>    }
+<a class="ln" id="L704" href="#L704">704</a>    <span class="kw">quote</span> { <span class="fn">el</span>($t, $kind, $props, $children) }
+<a class="ln" id="L705" href="#L705">705</a>  }
+<a class="ln" id="L706" href="#L706">706</a>}
+</code></pre>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/frame.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/frame.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/signal.taut&quot;</span> { rt }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/common.taut&quot;</span> { <span class="ty">Vocab</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> <span class="str">&quot;../../delim-html/src/markup.taut&quot;</span> { <span class="ty">HtmlAttr</span>, <span class="ty">HtmlKind</span> }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;../../delim/src/tree.taut&quot;</span> { <span class="ty">Node</span>, <span class="ty">Tree</span> }
+<a class="ln" id="L5" href="#L5">5</a><span class="kw">import</span> <span class="str">&quot;site.taut&quot;</span> { <span class="ty">Head</span>, <span class="ty">Page</span> }
+<a class="ln" id="L6" href="#L6">6</a>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// Nested layouts. A `Frame` is what pages of one section share: head entries and a wrapper</span>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// around the page's own view. Frames nest: `nested(outer, inner)` puts the inner frame's</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="com">// wrapper inside the outer one, so a site's shell, a section's nav and a page build one tree</span>
+<a class="ln" id="L10" href="#L10">10</a><span class="com">// and share one suspense and one set of resources.</span>
+<a class="ln" id="L11" href="#L11">11</a>
+<a class="ln" id="L12" href="#L12">12</a><span class="kw">pub(open)</span> <span class="kw">struct</span> <span class="ty">Frame</span> {
+<a class="ln" id="L13" href="#L13">13</a>  head: <span class="ty">List</span>(<a href="../src/site.taut.html#L23"><span class="ty">Head</span></a>),
+<a class="ln" id="L14" href="#L14">14</a>  wrap: (<span class="var">t</span>: <span class="ty">Tree</span>(<span class="ty">HtmlKind</span>, <span class="ty">HtmlAttr</span>), <span class="var">v</span>: <span class="ty">Vocab</span>(<span class="ty">HtmlKind</span>, <span class="ty">HtmlAttr</span>), <span class="var">inner</span>: <span class="ty">Node</span>) -&gt; <span class="ty">Node</span> ! {rt, div}
+<a class="ln" id="L15" href="#L15">15</a>}
+<a class="ln" id="L16" href="#L16">16</a>
+<a class="ln" id="L17" href="#L17">17</a><span class="kw">fn</span> <span class="fn">heads_then</span>(<span class="var">a</span>: <span class="ty">List</span>(<a href="../src/site.taut.html#L23"><span class="ty">Head</span></a>), <span class="var">b</span>: <span class="ty">List</span>(<a href="../src/site.taut.html#L23"><span class="ty">Head</span></a>)): <span class="ty">List</span>(<a href="../src/site.taut.html#L23"><span class="ty">Head</span></a>) {
+<a class="ln" id="L18" href="#L18">18</a>  <span class="kw">match</span> a {
+<a class="ln" id="L19" href="#L19">19</a>    <span class="ty">Nil</span> =&gt; b
+<a class="ln" id="L20" href="#L20">20</a>    <span class="ty">Cons</span>(h, rest) =&gt; <span class="ty">Cons</span>(h, <a href="#L17"><span class="fn">heads_then</span></a>(rest, b))
+<a class="ln" id="L21" href="#L21">21</a>  }
+<a class="ln" id="L22" href="#L22">22</a>}
+<a class="ln" id="L23" href="#L23">23</a>
+<a class="ln" id="L24" href="#L24">24</a><span class="com">// `p` inside `f`: `f`'s head entries come first, the title and language stay `p`'s.</span>
+<a class="ln" id="L25" href="#L25">25</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">framed</span>(<span class="var">f</span>: <a href="#L12"><span class="ty">Frame</span></a>, <span class="var">p</span>: <a href="../src/site.taut.html#L12"><span class="ty">Page</span></a>): <a href="../src/site.taut.html#L12"><span class="ty">Page</span></a> {
+<a class="ln" id="L26" href="#L26">26</a>  <span class="ty">Page</span> {
+<a class="ln" id="L27" href="#L27">27</a>    title: p.title,
+<a class="ln" id="L28" href="#L28">28</a>    lang: p.lang,
+<a class="ln" id="L29" href="#L29">29</a>    head: <a href="#L17"><span class="fn">heads_then</span></a>(f.head, p.head),
+<a class="ln" id="L30" href="#L30">30</a>    view: (<span class="var">t</span>: <span class="ty">Tree</span>(<span class="ty">HtmlKind</span>, <span class="ty">HtmlAttr</span>), <span class="var">v</span>: <span class="ty">Vocab</span>(<span class="ty">HtmlKind</span>, <span class="ty">HtmlAttr</span>)) =&gt; {
+<a class="ln" id="L31" href="#L31">31</a>      <span class="kw">let</span> inner := (p.view)(t, v)
+<a class="ln" id="L32" href="#L32">32</a>      (f.wrap)(t, v, inner)
+<a class="ln" id="L33" href="#L33">33</a>    }
+<a class="ln" id="L34" href="#L34">34</a>  }
+<a class="ln" id="L35" href="#L35">35</a>}
+<a class="ln" id="L36" href="#L36">36</a>
+<a class="ln" id="L37" href="#L37">37</a><span class="com">// A frame that puts `inner`'s result inside `outer`'s wrapper.</span>
+<a class="ln" id="L38" href="#L38">38</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">nested</span>(<span class="var">outer</span>: <a href="#L12"><span class="ty">Frame</span></a>, <span class="var">inner</span>: <a href="#L12"><span class="ty">Frame</span></a>): <a href="#L12"><span class="ty">Frame</span></a> {
+<a class="ln" id="L39" href="#L39">39</a>  <span class="ty">Frame</span> {
+<a class="ln" id="L40" href="#L40">40</a>    head: <a href="#L17"><span class="fn">heads_then</span></a>(outer.head, inner.head),
+<a class="ln" id="L41" href="#L41">41</a>    wrap: (<span class="var">t</span>: <span class="ty">Tree</span>(<span class="ty">HtmlKind</span>, <span class="ty">HtmlAttr</span>), <span class="var">v</span>: <span class="ty">Vocab</span>(<span class="ty">HtmlKind</span>, <span class="ty">HtmlAttr</span>), <span class="var">n</span>: <span class="ty">Node</span>) =&gt; {
+<a class="ln" id="L42" href="#L42">42</a>      <span class="kw">let</span> mid := (inner.wrap)(t, v, n)
+<a class="ln" id="L43" href="#L43">43</a>      (outer.wrap)(t, v, mid)
+<a class="ln" id="L44" href="#L44">44</a>    }
+<a class="ln" id="L45" href="#L45">45</a>  }
+<a class="ln" id="L46" href="#L46">46</a>}
+</code></pre>
+</html>

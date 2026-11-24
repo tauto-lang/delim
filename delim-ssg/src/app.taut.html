@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/app.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/app.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::par {
+<a class="ln" id="L2" href="#L2">2</a>  mutex_claim,
+<a class="ln" id="L3" href="#L3">3</a>  mutex_new,
+<a class="ln" id="L4" href="#L4">4</a>  mutex_put,
+<a class="ln" id="L5" href="#L5">5</a>  mutex_take_claimed,
+<a class="ln" id="L6" href="#L6">6</a>  ref_get,
+<a class="ln" id="L7" href="#L7">7</a>  ref_new,
+<a class="ln" id="L8" href="#L8">8</a>  ref_set,
+<a class="ln" id="L9" href="#L9">9</a>  wait,
+<a class="ln" id="L10" href="#L10">10</a>  weak_get,
+<a class="ln" id="L11" href="#L11">11</a>  weak_of
+<a class="ln" id="L12" href="#L12">12</a>}
+<a class="ln" id="L13" href="#L13">13</a><span class="kw">import</span> <span class="str">&quot;site.taut&quot;</span> { <span class="ty">Layout</span>, <span class="ty">Page</span>, generate_missing }
+<a class="ln" id="L14" href="#L14">14</a><span class="kw">import</span> std::builtin::os {
+<a class="ln" id="L15" href="#L15">15</a>  argv,
+<a class="ln" id="L16" href="#L16">16</a>  exit,
+<a class="ln" id="L17" href="#L17">17</a>  fs_create_dir,
+<a class="ln" id="L18" href="#L18">18</a>  fs_write,
+<a class="ln" id="L19" href="#L19">19</a>  fs_write_bytes,
+<a class="ln" id="L20" href="#L20">20</a>  hash_seed,
+<a class="ln" id="L21" href="#L21">21</a>  print,
+<a class="ln" id="L22" href="#L22">22</a>  stderr,
+<a class="ln" id="L23" href="#L23">23</a>  stdout
+<a class="ln" id="L24" href="#L24">24</a>}
+<a class="ln" id="L25" href="#L25">25</a><span class="kw">import</span> <span class="str">&quot;route.taut&quot;</span> { <span class="ty">Route</span> }
+<a class="ln" id="L26" href="#L26">26</a><span class="kw">import</span> <span class="str">&quot;resource.taut&quot;</span> { <span class="ty">Answer</span>, load }
+<a class="ln" id="L27" href="#L27">27</a>
+<a class="ln" id="L28" href="#L28">28</a><span class="com">// The framework's entry: a program that writes its pages ahead of time (`generate &lt;dir&gt;`).</span>
+<a class="ln" id="L29" href="#L29">29</a>
+<a class="ln" id="L30" href="#L30">30</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">App</span>(!e) {
+<a class="ln" id="L31" href="#L31">31</a>  <span class="com">// The pages written by `generate`, each at its route's path.</span>
+<a class="ln" id="L32" href="#L32">32</a>  routes: <span class="ty">List</span>(<a href="../src/route.taut.html#L10"><span class="ty">Route</span></a>),
+<a class="ln" id="L33" href="#L33">33</a>  <span class="com">// The loaders of the resources the pages read, made by `loading`.</span>
+<a class="ln" id="L34" href="#L34">34</a>  resources: <span class="ty">List</span>(<a href="../src/resource.taut.html#L13"><span class="ty">Answer</span></a>(!e)),
+<a class="ln" id="L35" href="#L35">35</a>  <span class="com">// Files written by `generate` at their paths, such as `text_asset(&quot;/style.css&quot;, css)` or</span>
+<a class="ln" id="L36" href="#L36">36</a>  <span class="com">// `#(@path &quot;/app.wasm&quot;, @body wasm)`. A path starts with `/` and has no `.` or `..` segment.</span>
+<a class="ln" id="L37" href="#L37">37</a>  assets: <span class="ty">List</span>(@path <span class="ty">Text</span> × @body <span class="ty">Bytes</span>),
+<a class="ln" id="L38" href="#L38">38</a>  <span class="com">// How `generate` names the files of the pages.</span>
+<a class="ln" id="L39" href="#L39">39</a>  layout: <a href="../src/site.taut.html#L43"><span class="ty">Layout</span></a>,
+<a class="ln" id="L40" href="#L40">40</a>  <span class="com">// The page `generate` writes as `/404.html`, which static hosts answer a path they have no</span>
+<a class="ln" id="L41" href="#L41">41</a>  <span class="com">// file for with; `None` writes none.</span>
+<a class="ln" id="L42" href="#L42">42</a>  not_found: <span class="ty">Option</span>(<a href="../src/site.taut.html#L12"><span class="ty">Page</span></a>)
+<a class="ln" id="L43" href="#L43">43</a>}
+<a class="ln" id="L44" href="#L44">44</a>
+<a class="ln" id="L45" href="#L45">45</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">usage</span>(): <span class="ty">Text</span> { <span class="str">&quot;usage: generate &lt;dir&gt;&quot;</span> }
+<a class="ln" id="L46" href="#L46">46</a>
+<a class="ln" id="L47" href="#L47">47</a><span class="kw">fn</span> <span class="fn">pairs_of</span>(<span class="var">rs</span>: <span class="ty">List</span>(<a href="../src/route.taut.html#L10"><span class="ty">Route</span></a>)): <span class="ty">List</span>(<span class="ty">Text</span> × <a href="../src/site.taut.html#L12"><span class="ty">Page</span></a>) {
+<a class="ln" id="L48" href="#L48">48</a>  <span class="kw">match</span> rs {
+<a class="ln" id="L49" href="#L49">49</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L50" href="#L50">50</a>    <span class="ty">Cons</span>(r, rest) =&gt; <span class="ty">Cons</span>(#(r.path, r.page), <a href="#L47"><span class="fn">pairs_of</span></a>(rest))
+<a class="ln" id="L51" href="#L51">51</a>  }
+<a class="ln" id="L52" href="#L52">52</a>}
+<a class="ln" id="L53" href="#L53">53</a>
+<a class="ln" id="L54" href="#L54">54</a><span class="com">// `generate &lt;dir&gt;` from the command line. It needs `--allow-write` and nothing else.</span>
+<a class="ln" id="L55" href="#L55">55</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">generate_app</span>&lt;!e&gt;(<span class="var">a</span>: <a href="#L30"><span class="ty">App</span></a>(!e)): <span class="ty">Unit</span> ! {
+<a class="ln" id="L56" href="#L56">56</a>  overflow,
+<a class="ln" id="L57" href="#L57">57</a>  wait,
+<a class="ln" id="L58" href="#L58">58</a>  argv,
+<a class="ln" id="L59" href="#L59">59</a>  stdout,
+<a class="ln" id="L60" href="#L60">60</a>  stderr,
+<a class="ln" id="L61" href="#L61">61</a>  exit,
+<a class="ln" id="L62" href="#L62">62</a>  fs_write,
+<a class="ln" id="L63" href="#L63">63</a>  fs_write_bytes,
+<a class="ln" id="L64" href="#L64">64</a>  fs_create_dir,
+<a class="ln" id="L65" href="#L65">65</a>  div,
+<a class="ln" id="L66" href="#L66">66</a>  mutex_claim,
+<a class="ln" id="L67" href="#L67">67</a>  mutex_new,
+<a class="ln" id="L68" href="#L68">68</a>  mutex_put,
+<a class="ln" id="L69" href="#L69">69</a>  mutex_take_claimed,
+<a class="ln" id="L70" href="#L70">70</a>  ref_get,
+<a class="ln" id="L71" href="#L71">71</a>  ref_new,
+<a class="ln" id="L72" href="#L72">72</a>  ref_set,
+<a class="ln" id="L73" href="#L73">73</a>  weak_get,
+<a class="ln" id="L74" href="#L74">74</a>  weak_of,
+<a class="ln" id="L75" href="#L75">75</a>  hash_seed
+<a class="ln" id="L76" href="#L76">76</a>} ∪ e {
+<a class="ln" id="L77" href="#L77">77</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">argv</span>() {
+<a class="ln" id="L78" href="#L78">78</a>    <span class="ty">Cons</span>(cmd, <span class="ty">Cons</span>(arg, rest)) =&gt; <span class="kw">if</span> cmd == <span class="str">&quot;generate&quot;</span> { <a href="#L88"><span class="fn">generate_to</span></a>(a, arg) } <span class="kw">else</span> {
+<a class="ln" id="L79" href="#L79">79</a>      <span class="fn">print</span>(<a href="#L45"><span class="fn">usage</span></a>())
+<a class="ln" id="L80" href="#L80">80</a>    }
+<a class="ln" id="L81" href="#L81">81</a>    <span class="ty">Nil</span> =&gt; <span class="fn">print</span>(<a href="#L45"><span class="fn">usage</span></a>())
+<a class="ln" id="L82" href="#L82">82</a>    <span class="ty">Cons</span>(_, <span class="ty">Nil</span>) =&gt; <span class="fn">print</span>(<a href="#L45"><span class="fn">usage</span></a>())
+<a class="ln" id="L83" href="#L83">83</a>  }
+<a class="ln" id="L84" href="#L84">84</a>}
+<a class="ln" id="L85" href="#L85">85</a>
+<a class="ln" id="L86" href="#L86">86</a><span class="com">// Writes the pages and assets of `a` under `dir`. A failure is written to standard error and</span>
+<a class="ln" id="L87" href="#L87">87</a><span class="com">// ends the program with exit code 1.</span>
+<a class="ln" id="L88" href="#L88">88</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">generate_to</span>&lt;!e&gt;(<span class="var">a</span>: <a href="#L30"><span class="ty">App</span></a>(!e), <span class="var">dir</span>: <span class="ty">Text</span>): <span class="ty">Unit</span> ! {
+<a class="ln" id="L89" href="#L89">89</a>  overflow,
+<a class="ln" id="L90" href="#L90">90</a>  wait,
+<a class="ln" id="L91" href="#L91">91</a>  stdout,
+<a class="ln" id="L92" href="#L92">92</a>  stderr,
+<a class="ln" id="L93" href="#L93">93</a>  exit,
+<a class="ln" id="L94" href="#L94">94</a>  fs_write,
+<a class="ln" id="L95" href="#L95">95</a>  fs_write_bytes,
+<a class="ln" id="L96" href="#L96">96</a>  fs_create_dir,
+<a class="ln" id="L97" href="#L97">97</a>  div,
+<a class="ln" id="L98" href="#L98">98</a>  mutex_claim,
+<a class="ln" id="L99" href="#L99">99</a>  mutex_new,
+<a class="ln" id="L100" href="#L100">100</a>  mutex_put,
+<a class="ln" id="L101" href="#L101">101</a>  mutex_take_claimed,
+<a class="ln" id="L102" href="#L102">102</a>  ref_get,
+<a class="ln" id="L103" href="#L103">103</a>  ref_new,
+<a class="ln" id="L104" href="#L104">104</a>  ref_set,
+<a class="ln" id="L105" href="#L105">105</a>  weak_get,
+<a class="ln" id="L106" href="#L106">106</a>  weak_of,
+<a class="ln" id="L107" href="#L107">107</a>  hash_seed
+<a class="ln" id="L108" href="#L108">108</a>} ∪ e {
+<a class="ln" id="L109" href="#L109">109</a>  <span class="kw">match</span> <a href="../src/site.taut.html#L228"><span class="fn">generate_missing</span></a>(
+<a class="ln" id="L110" href="#L110">110</a>    dir,
+<a class="ln" id="L111" href="#L111">111</a>    a.layout,
+<a class="ln" id="L112" href="#L112">112</a>    <a href="#L47"><span class="fn">pairs_of</span></a>(a.routes),
+<a class="ln" id="L113" href="#L113">113</a>    a.not_found,
+<a class="ln" id="L114" href="#L114">114</a>    (<span class="var">k</span>: <span class="ty">Text</span>) =&gt; <a href="../src/resource.taut.html#L30"><span class="fn">load</span></a>(a.resources, k),
+<a class="ln" id="L115" href="#L115">115</a>    a.assets
+<a class="ln" id="L116" href="#L116">116</a>  ) {
+<a class="ln" id="L117" href="#L117">117</a>    <span class="ty">Ok</span>(u) =&gt; <span class="fn">print</span>(<span class="str">&quot;generated&quot;</span>)
+<a class="ln" id="L118" href="#L118">118</a>    <span class="ty">Err</span>(why) =&gt; {
+<a class="ln" id="L119" href="#L119">119</a>      <span class="kw">perform</span> <span class="fn">stderr</span>(why)
+<a class="ln" id="L120" href="#L120">120</a>      <span class="kw">perform</span> <span class="fn">exit</span>(<span class="num">1</span>)
+<a class="ln" id="L121" href="#L121">121</a>    }
+<a class="ln" id="L122" href="#L122">122</a>  }
+<a class="ln" id="L123" href="#L123">123</a>}
+</code></pre>
+</html>

@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/hooks.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/hooks.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::par {
+<a class="ln" id="L2" href="#L2">2</a>  <span class="ty">Mutex</span>,
+<a class="ln" id="L3" href="#L3">3</a>  <span class="ty">MutexGuard</span>,
+<a class="ln" id="L4" href="#L4">4</a>  <span class="ty">Ref</span>,
+<a class="ln" id="L5" href="#L5">5</a>  mutex_new,
+<a class="ln" id="L6" href="#L6">6</a>  ref_get,
+<a class="ln" id="L7" href="#L7">7</a>  ref_new,
+<a class="ln" id="L8" href="#L8">8</a>  ref_set,
+<a class="ln" id="L9" href="#L9">9</a>  weak_get,
+<a class="ln" id="L10" href="#L10">10</a>  weak_of
+<a class="ln" id="L11" href="#L11">11</a>}
+<a class="ln" id="L12" href="#L12">12</a><span class="kw">import</span> <span class="str">&quot;signal.taut&quot;</span> {
+<a class="ln" id="L13" href="#L13">13</a>  <span class="ty">Load</span>,
+<a class="ln" id="L14" href="#L14">14</a>  <span class="ty">Signal</span>,
+<a class="ln" id="L15" href="#L15">15</a>  current,
+<a class="ln" id="L16" href="#L16">16</a>  dispose,
+<a class="ln" id="L17" href="#L17">17</a>  get,
+<a class="ln" id="L18" href="#L18">18</a>  memo,
+<a class="ln" id="L19" href="#L19">19</a>  on_cleanup,
+<a class="ln" id="L20" href="#L20">20</a>  peek,
+<a class="ln" id="L21" href="#L21">21</a>  rt,
+<a class="ln" id="L22" href="#L22">22</a>  scope,
+<a class="ln" id="L23" href="#L23">23</a>  set,
+<a class="ln" id="L24" href="#L24">24</a>  signal,
+<a class="ln" id="L25" href="#L25">25</a>  untracked,
+<a class="ln" id="L26" href="#L26">26</a>  watch
+<a class="ln" id="L27" href="#L27">27</a>}
+<a class="ln" id="L28" href="#L28">28</a><span class="kw">import</span> <span class="str">&quot;handle.taut&quot;</span> {
+<a class="ln" id="L29" href="#L29">29</a>  <span class="ty">Resource</span>,
+<a class="ln" id="L30" href="#L30">30</a>  <span class="ty">ResourceState</span>,
+<a class="ln" id="L31" href="#L31">31</a>  resource_cancelled,
+<a class="ln" id="L32" href="#L32">32</a>  resource_handle,
+<a class="ln" id="L33" href="#L33">33</a>  resource_wait,
+<a class="ln" id="L34" href="#L34">34</a>  state
+<a class="ln" id="L35" href="#L35">35</a>}
+<a class="ln" id="L36" href="#L36">36</a><span class="kw">import</span> <span class="str">&quot;resource.taut&quot;</span> { request }
+<a class="ln" id="L37" href="#L37">37</a>
+<a class="ln" id="L38" href="#L38">38</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">ActionPolicy</span> { <span class="ty">IgnoreWhilePending</span>, <span class="ty">LatestWins</span> }
+<a class="ln" id="L39" href="#L39">39</a><span class="kw">pub(open)</span> <span class="kw">effect</span> <span class="fn">action_live</span>(): <span class="ty">Bool</span> <span class="kw">direct</span>
+<a class="ln" id="L40" href="#L40">40</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">commit_current</span>(<span class="var">body</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt, div, action_live} {
+<a class="ln" id="L41" href="#L41">41</a>  <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">action_live</span>() { <span class="fn">body</span>() } <span class="kw">else</span> { #() }
+<a class="ln" id="L42" href="#L42">42</a>}
+<a class="ln" id="L43" href="#L43">43</a><span class="com">// `on_cancel(f)` in a run: `f()` runs if the run ends without settling (stopped, invalidated,</span>
+<a class="ln" id="L44" href="#L44">44</a><span class="com">// replaced by a newer run, or its owner disposed), and not once it has settled.</span>
+<a class="ln" id="L45" href="#L45">45</a><span class="kw">pub(open)</span> <span class="kw">effect</span> <span class="fn">action_on_cancel</span>(): <span class="ty">Ref</span>(<span class="ty">Bool</span>) <span class="kw">direct</span>
+<a class="ln" id="L46" href="#L46">46</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">on_cancel</span>(<span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt, action_on_cancel} {
+<a class="ln" id="L47" href="#L47">47</a>  <span class="com">// Whether the run has settled, read when its owner ends.</span>
+<a class="ln" id="L48" href="#L48">48</a>  <span class="kw">let</span> settled := <span class="kw">perform</span> <span class="fn">action_on_cancel</span>()
+<a class="ln" id="L49" href="#L49">49</a>  <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(() =&gt; <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(settled) { #() } <span class="kw">else</span> { <span class="fn">f</span>() })
+<a class="ln" id="L50" href="#L50">50</a>}
+<a class="ln" id="L51" href="#L51">51</a><span class="kw">pub(open)</span> <span class="kw">struct</span> <span class="ty">ActionOptions</span>(
+<a class="ln" id="L52" href="#L52">52</a>  <span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>,
+<a class="ln" id="L53" href="#L53">53</a>  <span class="ty">B</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>,
+<a class="ln" id="L54" href="#L54">54</a>  <span class="ty">E</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>,
+<a class="ln" id="L55" href="#L55">55</a>  <span class="ty">I</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>,
+<a class="ln" id="L56" href="#L56">56</a>  <span class="ty">R</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>
+<a class="ln" id="L57" href="#L57">57</a>) {
+<a class="ln" id="L58" href="#L58">58</a>  policy: <a href="#L38"><span class="ty">ActionPolicy</span></a>,
+<a class="ln" id="L59" href="#L59">59</a>  <span class="com">// What the action's input depends on: when what it reads changes, the current run is</span>
+<a class="ln" id="L60" href="#L60">60</a>  <span class="com">// cancelled and its result cleared. It never starts a run.</span>
+<a class="ln" id="L61" href="#L61">61</a>  invalidate_on: () -&gt; <span class="ty">I</span> ! {rt, div},
+<a class="ln" id="L62" href="#L62">62</a>  run: (<span class="var">input</span>: <span class="ty">A</span>) -&gt; <span class="ty">B</span> ! {
+<a class="ln" id="L63" href="#L63">63</a>    rt,
+<a class="ln" id="L64" href="#L64">64</a>    div,
+<a class="ln" id="L65" href="#L65">65</a>    <span class="fn">resource_wait</span>(<span class="ty">R</span>, <span class="ty">E</span>),
+<a class="ln" id="L66" href="#L66">66</a>    resource_cancelled,
+<a class="ln" id="L67" href="#L67">67</a>    <span class="fn">fail</span>(<span class="ty">E</span>),
+<a class="ln" id="L68" href="#L68">68</a>    action_live,
+<a class="ln" id="L69" href="#L69">69</a>    action_on_cancel
+<a class="ln" id="L70" href="#L70">70</a>  },
+<a class="ln" id="L71" href="#L71">71</a>  <span class="com">// Runs once when a run succeeds, before its `Ready` is published; never after it is cancelled.</span>
+<a class="ln" id="L72" href="#L72">72</a>  on_success: (<span class="var">value</span>: <span class="ty">B</span>) -&gt; <span class="ty">Unit</span> ! {rt, div}
+<a class="ln" id="L73" href="#L73">73</a>}
+<a class="ln" id="L74" href="#L74">74</a>
+<a class="ln" id="L75" href="#L75">75</a><span class="com">// Starts loading the resource named `key` now; reading it is independent of where it started.</span>
+<a class="ln" id="L76" href="#L76">76</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">use_res</span>(<span class="var">key</span>: <span class="ty">Text</span>): <a href="../src/handle.taut.html#L10"><span class="ty">Resource</span></a>(<span class="ty">Text</span>, <span class="ty">Text</span>) ! {rt, div} {
+<a class="ln" id="L77" href="#L77">77</a>  <span class="kw">let</span> load := <a href="../src/resource.taut.html#L68"><span class="fn">request</span></a>(key)
+<a class="ln" id="L78" href="#L78">78</a>  <a href="../src/handle.taut.html#L14"><span class="fn">resource_handle</span></a>(<a href="../src/signal.taut.html#L649"><span class="fn">memo</span></a>(() =&gt; <span class="kw">match</span> <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(load) {
+<a class="ln" id="L79" href="#L79">79</a>    <span class="ty">Loading</span> =&gt; <a href="../src/handle.taut.html#L5"><span class="ty">Pending</span></a>
+<a class="ln" id="L80" href="#L80">80</a>    <span class="ty">Loaded</span>(value) =&gt; <a href="../src/handle.taut.html#L6"><span class="ty">Ready</span></a>(value)
+<a class="ln" id="L81" href="#L81">81</a>    <span class="ty">LoadFailed</span>(why) =&gt; <a href="../src/handle.taut.html#L7"><span class="ty">Failed</span></a>(why)
+<a class="ln" id="L82" href="#L82">82</a>  }))
+<a class="ln" id="L83" href="#L83">83</a>}
+<a class="ln" id="L84" href="#L84">84</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Action</span>(<span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">B</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">E</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>) {
+<a class="ln" id="L85" href="#L85">85</a>  start: (<span class="var">input</span>: <span class="ty">A</span>) -&gt; <span class="ty">Unit</span> ! {rt, div},
+<a class="ln" id="L86" href="#L86">86</a>  cancel: () -&gt; <span class="ty">Unit</span> ! {rt, div},
+<a class="ln" id="L87" href="#L87">87</a>  clear: () -&gt; <span class="ty">Unit</span> ! {rt, div},
+<a class="ln" id="L88" href="#L88">88</a>  pending: () -&gt; <span class="ty">Bool</span> ! {rt},
+<a class="ln" id="L89" href="#L89">89</a>  result: () -&gt; <span class="ty">Option</span>(<a href="../src/handle.taut.html#L10"><span class="ty">Resource</span></a>(<span class="ty">B</span>, <span class="ty">E</span>)) ! {rt}
+<a class="ln" id="L90" href="#L90">90</a>}
+<a class="ln" id="L91" href="#L91">91</a><span class="com">// Whether the current run still counts is read in place: this frame holds no suspended run.</span>
+<a class="ln" id="L92" href="#L92">92</a><span class="kw">fn</span> <span class="fn">with_live</span>&lt;<span class="ty">B</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">E</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">R</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L93" href="#L93">93</a>  <span class="var">live</span>: <span class="ty">Ref</span>(<span class="ty">Bool</span>),
+<a class="ln" id="L94" href="#L94">94</a>  <span class="var">settled</span>: <span class="ty">Ref</span>(<span class="ty">Bool</span>),
+<a class="ln" id="L95" href="#L95">95</a>  <span class="var">result</span>: <span class="ty">delim::src::signal::Signal</span>(<a href="../src/handle.taut.html#L4"><span class="ty">ResourceState</span></a>(<span class="ty">B</span>, <span class="ty">E</span>)),
+<a class="ln" id="L96" href="#L96">96</a>  <span class="var">body</span>: <span class="kw">affine</span> () -&gt; <span class="ty">Unit</span> ! {
+<a class="ln" id="L97" href="#L97">97</a>    rt,
+<a class="ln" id="L98" href="#L98">98</a>    div,
+<a class="ln" id="L99" href="#L99">99</a>    <span class="fn">resource_wait</span>(<span class="ty">R</span>, <span class="ty">E</span>),
+<a class="ln" id="L100" href="#L100">100</a>    resource_cancelled,
+<a class="ln" id="L101" href="#L101">101</a>    <span class="fn">fail</span>(<span class="ty">E</span>),
+<a class="ln" id="L102" href="#L102">102</a>    action_live,
+<a class="ln" id="L103" href="#L103">103</a>    action_on_cancel
+<a class="ln" id="L104" href="#L104">104</a>  }
+<a class="ln" id="L105" href="#L105">105</a>): <span class="ty">Unit</span> ! {rt, div, <span class="fn">resource_wait</span>(<span class="ty">R</span>, <span class="ty">E</span>), resource_cancelled, <span class="fn">fail</span>(<span class="ty">E</span>)} {
+<a class="ln" id="L106" href="#L106">106</a>  <span class="kw">handle</span> { <span class="fn">body</span>() } <span class="kw">with</span> {
+<a class="ln" id="L107" href="#L107">107</a>    <span class="fn">action_live</span>(), k =&gt; <span class="fn">k</span>(<span class="kw">perform</span> <span class="fn">ref_get</span>(live))
+<a class="ln" id="L108" href="#L108">108</a>    <span class="fn">action_on_cancel</span>(), k =&gt; <span class="fn">k</span>(settled)
+<a class="ln" id="L109" href="#L109">109</a>    <span class="kw">return</span> value =&gt; value
+<a class="ln" id="L110" href="#L110">110</a>  }
+<a class="ln" id="L111" href="#L111">111</a>}
+<a class="ln" id="L112" href="#L112">112</a><span class="kw">fn</span> <span class="fn">resume_action</span>&lt;<span class="ty">B</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">E</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">R</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L113" href="#L113">113</a>  <span class="var">body</span>: <span class="kw">affine</span> () -&gt; <span class="ty">Unit</span> ! {rt, div, <span class="fn">resource_wait</span>(<span class="ty">R</span>, <span class="ty">E</span>), resource_cancelled, <span class="fn">fail</span>(<span class="ty">E</span>)},
+<a class="ln" id="L114" href="#L114">114</a>  <span class="var">live</span>: <span class="ty">Ref</span>(<span class="ty">Bool</span>),
+<a class="ln" id="L115" href="#L115">115</a>  <span class="var">settled</span>: <span class="ty">Ref</span>(<span class="ty">Bool</span>),
+<a class="ln" id="L116" href="#L116">116</a>  <span class="var">result</span>: <span class="ty">delim::src::signal::Signal</span>(<a href="../src/handle.taut.html#L4"><span class="ty">ResourceState</span></a>(<span class="ty">B</span>, <span class="ty">E</span>))
+<a class="ln" id="L117" href="#L117">117</a>): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L118" href="#L118">118</a>  <span class="kw">handle</span> {
+<a class="ln" id="L119" href="#L119">119</a>    <span class="fn">body</span>()
+<a class="ln" id="L120" href="#L120">120</a>  } <span class="kw">with</span> {
+<a class="ln" id="L121" href="#L121">121</a>    <span class="fn">resource_wait</span>&lt;<span class="ty">R</span>, <span class="ty">E</span>&gt;(resource), k =&gt; {
+<a class="ln" id="L122" href="#L122">122</a>      <span class="com">// The affine continuation is consumed once, even if the resource changes again.</span>
+<a class="ln" id="L123" href="#L123">123</a>      <span class="com">// The owner's cleanup holds the continuation; the watcher only looks at it.</span>
+<a class="ln" id="L124" href="#L124">124</a>      <span class="kw">let</span> continuation := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="ty">Some</span>(k)))
+<a class="ln" id="L125" href="#L125">125</a>      <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(() =&gt; { <span class="kw">let</span> held := <span class="kw">perform</span> <span class="fn">ref_get</span>(continuation); #() })
+<a class="ln" id="L126" href="#L126">126</a>      <span class="kw">let</span> waiting := <span class="kw">perform</span> <span class="fn">weak_of</span>(continuation)
+<a class="ln" id="L127" href="#L127">127</a>      <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; <span class="kw">match</span> <span class="kw">match</span> <a href="../src/handle.taut.html#L19"><span class="fn">state</span></a>(resource) { <span class="ty">Pending</span> =&gt; <span class="kw">false</span>, <span class="ty">Ready</span>(_) =&gt; <span class="kw">true</span>, <span class="ty">Failed</span>(_) =&gt; <span class="kw">true</span>, <span class="ty">Cancelled</span> =&gt; <span class="kw">true</span> } {
+<a class="ln" id="L128" href="#L128">128</a>        <span class="kw">false</span> =&gt; #()
+<a class="ln" id="L129" href="#L129">129</a>        <span class="kw">true</span> =&gt; <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">weak_get</span>(waiting) {
+<a class="ln" id="L130" href="#L130">130</a>          <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L131" href="#L131">131</a>          <span class="ty">Some</span>(slot) =&gt; {
+<a class="ln" id="L132" href="#L132">132</a>            <span class="kw">var</span> guard := <span class="fn">Mutex::lock</span>(<span class="kw">perform</span> <span class="fn">ref_get</span>(slot))
+<a class="ln" id="L133" href="#L133">133</a>            <span class="kw">let</span> next := <span class="fn">replace</span>(<span class="fn">MutexGuard::get_mut</span>(&amp;<span class="kw">mut</span> guard), <span class="ty">None</span>)
+<a class="ln" id="L134" href="#L134">134</a>            <span class="kw">match</span> next {
+<a class="ln" id="L135" href="#L135">135</a>              <span class="ty">Some</span>(continue_once) =&gt; <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(live) {
+<a class="ln" id="L136" href="#L136">136</a>                <span class="com">// The run waits on `R` again: the written type says so where nothing else does.</span>
+<a class="ln" id="L137" href="#L137">137</a>                <span class="kw">let</span> again: <span class="kw">affine</span> () -&gt; <span class="ty">Unit</span> ! {rt, div, <span class="fn">resource_wait</span>(<span class="ty">R</span>, <span class="ty">E</span>), resource_cancelled, <span class="fn">fail</span>(<span class="ty">E</span>)} := () =&gt; <span class="fn">continue_once</span>(#())
+<a class="ln" id="L138" href="#L138">138</a>                <a href="#L112"><span class="fn">resume_action</span></a>(again, live, settled, result)
+<a class="ln" id="L139" href="#L139">139</a>              } <span class="kw">else</span> { #() }
+<a class="ln" id="L140" href="#L140">140</a>              <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L141" href="#L141">141</a>            }
+<a class="ln" id="L142" href="#L142">142</a>          }
+<a class="ln" id="L143" href="#L143">143</a>        }
+<a class="ln" id="L144" href="#L144">144</a>      })
+<a class="ln" id="L145" href="#L145">145</a>    }
+<a class="ln" id="L146" href="#L146">146</a>    <span class="fn">fail</span>&lt;<span class="ty">E</span>&gt;(error) =&gt; <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(live) {
+<a class="ln" id="L147" href="#L147">147</a>      <span class="kw">perform</span> <span class="fn">ref_set</span>(settled, <span class="kw">true</span>); <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(result, <a href="../src/handle.taut.html#L7"><span class="ty">Failed</span></a>(error)); <span class="kw">perform</span> <span class="fn">ref_set</span>(live, <span class="kw">false</span>)
+<a class="ln" id="L148" href="#L148">148</a>    } <span class="kw">else</span> { #() }
+<a class="ln" id="L149" href="#L149">149</a>    <span class="fn">resource_cancelled</span>() =&gt; <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(live) {
+<a class="ln" id="L150" href="#L150">150</a>      <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(result, <a href="../src/handle.taut.html#L8"><span class="ty">Cancelled</span></a>); <span class="kw">perform</span> <span class="fn">ref_set</span>(live, <span class="kw">false</span>)
+<a class="ln" id="L151" href="#L151">151</a>    } <span class="kw">else</span> { #() }
+<a class="ln" id="L152" href="#L152">152</a>    <span class="kw">return</span> value =&gt; value
+<a class="ln" id="L153" href="#L153">153</a>  }
+<a class="ln" id="L154" href="#L154">154</a>}
+<a class="ln" id="L155" href="#L155">155</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">use_action</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">B</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">E</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">I</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>, <span class="ty">R</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L156" href="#L156">156</a>  <span class="var">options</span>: <a href="#L51"><span class="ty">ActionOptions</span></a>(<span class="ty">A</span>, <span class="ty">B</span>, <span class="ty">E</span>, <span class="ty">I</span>, <span class="ty">R</span>)
+<a class="ln" id="L157" href="#L157">157</a>): <a href="#L84"><span class="ty">Action</span></a>(<span class="ty">A</span>, <span class="ty">B</span>, <span class="ty">E</span>) ! {rt, div} {
+<a class="ln" id="L158" href="#L158">158</a>  <span class="kw">let</span> latest: <span class="ty">delim::src::signal::Signal</span>(
+<a class="ln" id="L159" href="#L159">159</a>    <span class="ty">Option</span>(<span class="ty">delim::src::signal::Signal</span>(<a href="../src/handle.taut.html#L4"><span class="ty">ResourceState</span></a>(<span class="ty">B</span>, <span class="ty">E</span>)))
+<a class="ln" id="L160" href="#L160">160</a>  ) := <a href="../src/signal.taut.html#L404"><span class="fn">signal</span></a>(<span class="ty">None</span>)
+<a class="ln" id="L161" href="#L161">161</a>  <span class="kw">let</span> live := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">false</span>))
+<a class="ln" id="L162" href="#L162">162</a>  <span class="kw">let</span> child := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">None</span>)
+<a class="ln" id="L163" href="#L163">163</a>  <span class="kw">let</span> cancel := () =&gt; {
+<a class="ln" id="L164" href="#L164">164</a>    <span class="kw">perform</span> <span class="fn">ref_set</span>(<span class="kw">perform</span> <span class="fn">ref_get</span>(live), <span class="kw">false</span>)
+<a class="ln" id="L165" href="#L165">165</a>    <span class="kw">match</span> <a href="../src/signal.taut.html#L438"><span class="fn">peek</span></a>(latest) {
+<a class="ln" id="L166" href="#L166">166</a>      <span class="ty">Some</span>(value) =&gt; <span class="kw">match</span> <a href="../src/signal.taut.html#L438"><span class="fn">peek</span></a>(value) {
+<a class="ln" id="L167" href="#L167">167</a>        <span class="ty">Pending</span> =&gt; <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(value, <a href="../src/handle.taut.html#L8"><span class="ty">Cancelled</span></a>),
+<a class="ln" id="L168" href="#L168">168</a>        <span class="ty">Ready</span>(_) =&gt; #(),
+<a class="ln" id="L169" href="#L169">169</a>        <span class="ty">Failed</span>(_) =&gt; #(),
+<a class="ln" id="L170" href="#L170">170</a>        <span class="ty">Cancelled</span> =&gt; #()
+<a class="ln" id="L171" href="#L171">171</a>      }
+<a class="ln" id="L172" href="#L172">172</a>      <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L173" href="#L173">173</a>    }
+<a class="ln" id="L174" href="#L174">174</a>    <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(child) {
+<a class="ln" id="L175" href="#L175">175</a>      <span class="ty">Some</span>(owner) =&gt; { <span class="kw">perform</span> <span class="fn">ref_set</span>(child, <span class="ty">None</span>); <a href="../src/signal.taut.html#L739"><span class="fn">dispose</span></a>(owner) },
+<a class="ln" id="L176" href="#L176">176</a>      <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L177" href="#L177">177</a>    }
+<a class="ln" id="L178" href="#L178">178</a>  }
+<a class="ln" id="L179" href="#L179">179</a>  <a href="../src/signal.taut.html#L683"><span class="fn">on_cleanup</span></a>(cancel)
+<a class="ln" id="L180" href="#L180">180</a>  <span class="kw">let</span> watched := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">false</span>)
+<a class="ln" id="L181" href="#L181">181</a>  <a href="../src/signal.taut.html#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L182" href="#L182">182</a>    <span class="kw">let</span> input := (options.invalidate_on)()
+<a class="ln" id="L183" href="#L183">183</a>    <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(watched) { <a href="../src/signal.taut.html#L673"><span class="fn">untracked</span></a>(() =&gt; { <span class="fn">cancel</span>(); <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(latest, <span class="ty">None</span>) }) } <span class="kw">else</span> { <span class="kw">perform</span> <span class="fn">ref_set</span>(watched, <span class="kw">true</span>) }
+<a class="ln" id="L184" href="#L184">184</a>  })
+<a class="ln" id="L185" href="#L185">185</a>  <span class="kw">let</span> owner := <span class="kw">perform</span> <span class="fn">ref_get</span>(<a href="../src/signal.taut.html#L391"><span class="fn">current</span></a>().owner)
+<a class="ln" id="L186" href="#L186">186</a>  <span class="ty">Action</span> {
+<a class="ln" id="L187" href="#L187">187</a>    start: input =&gt; {
+<a class="ln" id="L188" href="#L188">188</a>      <span class="kw">let</span> busy := <span class="kw">match</span> <a href="../src/signal.taut.html#L438"><span class="fn">peek</span></a>(latest) {
+<a class="ln" id="L189" href="#L189">189</a>        <span class="ty">Some</span>(value) =&gt; <span class="kw">match</span> <a href="../src/signal.taut.html#L438"><span class="fn">peek</span></a>(value) {
+<a class="ln" id="L190" href="#L190">190</a>          <span class="ty">Pending</span> =&gt; <span class="kw">true</span>,
+<a class="ln" id="L191" href="#L191">191</a>          <span class="ty">Ready</span>(_) =&gt; <span class="kw">false</span>,
+<a class="ln" id="L192" href="#L192">192</a>          <span class="ty">Failed</span>(_) =&gt; <span class="kw">false</span>,
+<a class="ln" id="L193" href="#L193">193</a>          <span class="ty">Cancelled</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L194" href="#L194">194</a>        },
+<a class="ln" id="L195" href="#L195">195</a>        <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L196" href="#L196">196</a>      }
+<a class="ln" id="L197" href="#L197">197</a>      <span class="kw">if</span> busy &amp;&amp; options.policy == <a href="#L38"><span class="ty">IgnoreWhilePending</span></a> { #() } <span class="kw">else</span> {
+<a class="ln" id="L198" href="#L198">198</a>        <span class="fn">cancel</span>()
+<a class="ln" id="L199" href="#L199">199</a>        <span class="kw">let</span> active := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">true</span>)
+<a class="ln" id="L200" href="#L200">200</a>        <span class="kw">perform</span> <span class="fn">ref_set</span>(live, active)
+<a class="ln" id="L201" href="#L201">201</a>        <span class="kw">let</span> value: <span class="ty">delim::src::signal::Signal</span>(<a href="../src/handle.taut.html#L4"><span class="ty">ResourceState</span></a>(<span class="ty">B</span>, <span class="ty">E</span>)) := <a href="../src/signal.taut.html#L404"><span class="fn">signal</span></a>(<a href="../src/handle.taut.html#L5"><span class="ty">Pending</span></a>)
+<a class="ln" id="L202" href="#L202">202</a>        <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(latest, <span class="ty">Some</span>(value))
+<a class="ln" id="L203" href="#L203">203</a>        <span class="kw">let</span> runtime := <a href="../src/signal.taut.html#L391"><span class="fn">current</span></a>()
+<a class="ln" id="L204" href="#L204">204</a>        <span class="kw">let</span> previous := <span class="kw">perform</span> <span class="fn">ref_get</span>(runtime.owner)
+<a class="ln" id="L205" href="#L205">205</a>        <span class="kw">perform</span> <span class="fn">ref_set</span>(runtime.owner, owner)
+<a class="ln" id="L206" href="#L206">206</a>        <span class="kw">let</span> settled := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">false</span>)
+<a class="ln" id="L207" href="#L207">207</a>        <span class="kw">let</span> invocation := <a href="../src/signal.taut.html#L727"><span class="fn">scope</span></a>(() =&gt; <a href="#L112"><span class="fn">resume_action</span></a>(() =&gt; <a href="#L92"><span class="fn">with_live</span></a>(active, settled, value, () =&gt; {
+<a class="ln" id="L208" href="#L208">208</a>          <span class="kw">let</span> answer := (options.run)(input)
+<a class="ln" id="L209" href="#L209">209</a>          <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(active) { <span class="kw">perform</span> <span class="fn">ref_set</span>(settled, <span class="kw">true</span>); (options.on_success)(answer); <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(value, <a href="../src/handle.taut.html#L6"><span class="ty">Ready</span></a>(answer)); <span class="kw">perform</span> <span class="fn">ref_set</span>(active, <span class="kw">false</span>) } <span class="kw">else</span> { #() }
+<a class="ln" id="L210" href="#L210">210</a>        }), active, settled, value))
+<a class="ln" id="L211" href="#L211">211</a>        <span class="kw">perform</span> <span class="fn">ref_set</span>(runtime.owner, previous)
+<a class="ln" id="L212" href="#L212">212</a>        <span class="kw">perform</span> <span class="fn">ref_set</span>(child, <span class="ty">Some</span>(invocation.owner))
+<a class="ln" id="L213" href="#L213">213</a>      }
+<a class="ln" id="L214" href="#L214">214</a>    },
+<a class="ln" id="L215" href="#L215">215</a>    cancel: cancel,
+<a class="ln" id="L216" href="#L216">216</a>    clear: () =&gt; { <span class="fn">cancel</span>(); <a href="../src/signal.taut.html#L499"><span class="fn">set</span></a>(latest, <span class="ty">None</span>) },
+<a class="ln" id="L217" href="#L217">217</a>    pending: () =&gt; <span class="kw">match</span> <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(latest) {
+<a class="ln" id="L218" href="#L218">218</a>      <span class="ty">Some</span>(value) =&gt; <span class="kw">match</span> <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(value) {
+<a class="ln" id="L219" href="#L219">219</a>        <span class="ty">Pending</span> =&gt; <span class="kw">true</span>,
+<a class="ln" id="L220" href="#L220">220</a>        <span class="ty">Ready</span>(_) =&gt; <span class="kw">false</span>,
+<a class="ln" id="L221" href="#L221">221</a>        <span class="ty">Failed</span>(_) =&gt; <span class="kw">false</span>,
+<a class="ln" id="L222" href="#L222">222</a>        <span class="ty">Cancelled</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L223" href="#L223">223</a>      },
+<a class="ln" id="L224" href="#L224">224</a>      <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L225" href="#L225">225</a>    },
+<a class="ln" id="L226" href="#L226">226</a>    result: () =&gt; <span class="kw">match</span> <a href="../src/signal.taut.html#L433"><span class="fn">get</span></a>(latest) { <span class="ty">Some</span>(value) =&gt; <span class="ty">Some</span>(<a href="../src/handle.taut.html#L14"><span class="fn">resource_handle</span></a>(value)), <span class="ty">None</span> =&gt; <span class="ty">None</span> }
+<a class="ln" id="L227" href="#L227">227</a>  }
+<a class="ln" id="L228" href="#L228">228</a>}
+</code></pre>
+</html>

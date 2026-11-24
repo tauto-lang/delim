@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/signal.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/signal.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::os { hash_seed }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> std::hashmap { <span class="ty">HashMap</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> std::builtin::par {
+<a class="ln" id="L4" href="#L4">4</a>  <span class="ty">Mutex</span>,
+<a class="ln" id="L5" href="#L5">5</a>  <span class="ty">MutexGuard</span>,
+<a class="ln" id="L6" href="#L6">6</a>  <span class="ty">Ref</span>,
+<a class="ln" id="L7" href="#L7">7</a>  mutex_claim,
+<a class="ln" id="L8" href="#L8">8</a>  mutex_new,
+<a class="ln" id="L9" href="#L9">9</a>  mutex_put,
+<a class="ln" id="L10" href="#L10">10</a>  mutex_take_claimed,
+<a class="ln" id="L11" href="#L11">11</a>  ref_get,
+<a class="ln" id="L12" href="#L12">12</a>  ref_new,
+<a class="ln" id="L13" href="#L13">13</a>  ref_set,
+<a class="ln" id="L14" href="#L14">14</a>  wait,
+<a class="ln" id="L15" href="#L15">15</a>  weak_get,
+<a class="ln" id="L16" href="#L16">16</a>  weak_of
+<a class="ln" id="L17" href="#L17">17</a>}
+<a class="ln" id="L18" href="#L18">18</a><span class="com">// Fine-grained reactivity: signals, memos, watchers and the owner tree.</span>
+<a class="ln" id="L19" href="#L19">19</a><span class="com">//</span>
+<a class="ln" id="L20" href="#L20">20</a><span class="com">// A signal holds its value in a `Ref` and knows only its id. Who reads which signal and the</span>
+<a class="ln" id="L21" href="#L21">21</a><span class="com">// owner tree are kept by the runtime in hash maps of ids, and each watcher's function is kept</span>
+<a class="ln" id="L22" href="#L22">22</a><span class="com">// by the runtime too, so a signal never points at the code that reads it and no strong</span>
+<a class="ln" id="L23" href="#L23">23</a><span class="com">// reference cycle forms. The runtime is reached through the effect `rt`, which `reactive`</span>
+<a class="ln" id="L24" href="#L24">24</a><span class="com">// provides. Its runtime lookup is direct; table locks leave `wait` to the host.</span>
+<a class="ln" id="L25" href="#L25">25</a>
+<a class="ln" id="L26" href="#L26">26</a><span class="com">// A watcher: the function to run again when a signal it read changes.</span>
+<a class="ln" id="L27" href="#L27">27</a><span class="kw">struct</span> <span class="ty">Watcher</span> { id: u64, run: () -&gt; <span class="ty">Unit</span> ! {rt, div} }
+<a class="ln" id="L28" href="#L28">28</a><span class="kw">struct</span> <span class="ty">Cleanup</span> { owner: u64, run: () -&gt; <span class="ty">Unit</span> ! {rt, div} }
+<a class="ln" id="L29" href="#L29">29</a>
+<a class="ln" id="L30" href="#L30">30</a><span class="com">// A timer the renderer has to start: run `run` after `ms` milliseconds, while `live` is true.</span>
+<a class="ln" id="L31" href="#L31">31</a><span class="com">// `every` is set when the timer starts again after each run.</span>
+<a class="ln" id="L32" href="#L32">32</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Timer</span> {
+<a class="ln" id="L33" href="#L33">33</a>  ms: u64,
+<a class="ln" id="L34" href="#L34">34</a>  every: <span class="ty">Bool</span>,
+<a class="ln" id="L35" href="#L35">35</a>  live: <span class="ty">Ref</span>(<span class="ty">Bool</span>),
+<a class="ln" id="L36" href="#L36">36</a>  run: () -&gt; <span class="ty">Unit</span> ! {rt, div}
+<a class="ln" id="L37" href="#L37">37</a>}
+<a class="ln" id="L38" href="#L38">38</a>
+<a class="ln" id="L39" href="#L39">39</a><span class="com">// What a resource has: nothing yet, its text, or why loading it failed.</span>
+<a class="ln" id="L40" href="#L40">40</a><span class="kw">pub(open)</span> <span class="kw">enum</span> <span class="ty">Load</span> {
+<a class="ln" id="L41" href="#L41">41</a>  <span class="ty">Loading</span>
+<a class="ln" id="L42" href="#L42">42</a>  <span class="ty">Loaded</span>(<span class="ty">Text</span>)
+<a class="ln" id="L43" href="#L43">43</a>  <span class="ty">LoadFailed</span>(<span class="ty">Text</span>)
+<a class="ln" id="L44" href="#L44">44</a>}
+<a class="ln" id="L45" href="#L45">45</a>
+<a class="ln" id="L46" href="#L46">46</a><span class="com">// A resource named `key` that the renderer has to load, and the count of the suspense</span>
+<a class="ln" id="L47" href="#L47">47</a><span class="com">// boundary waiting for it, if any.</span>
+<a class="ln" id="L48" href="#L48">48</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Want</span> {
+<a class="ln" id="L49" href="#L49">49</a>  key: <span class="ty">Text</span>,
+<a class="ln" id="L50" href="#L50">50</a>  state: <span class="ty">delim::src::signal::Signal</span>(<a href="#L40"><span class="ty">Load</span></a>),
+<a class="ln" id="L51" href="#L51">51</a>  boundary: <span class="ty">Option</span>(<span class="ty">delim::src::signal::Signal</span>(u64)),
+<a class="ln" id="L52" href="#L52">52</a>  <span class="com">// Whether it was resolved or rejected.</span>
+<a class="ln" id="L53" href="#L53">53</a>  settled: <span class="ty">Ref</span>(<span class="ty">Bool</span>)
+<a class="ln" id="L54" href="#L54">54</a>}
+<a class="ln" id="L55" href="#L55">55</a>
+<a class="ln" id="L56" href="#L56">56</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Runtime</span> {
+<a class="ln" id="L57" href="#L57">57</a>  <span class="com">// The resources asked for since the renderer last took them, newest</span>
+<a class="ln" id="L58" href="#L58">58</a>  <span class="com">// first.</span>
+<a class="ln" id="L59" href="#L59">59</a>  wants: <span class="ty">Ref</span>(<span class="ty">List</span>(<a href="#L48"><span class="ty">Want</span></a>)),
+<a class="ln" id="L60" href="#L60">60</a>  next: <span class="ty">Ref</span>(u64),
+<a class="ln" id="L61" href="#L61">61</a>  <span class="com">// The watcher whose run is reading signals now, if any.</span>
+<a class="ln" id="L62" href="#L62">62</a>  observer: <span class="ty">Ref</span>(<span class="ty">Option</span>(u64)),
+<a class="ln" id="L63" href="#L63">63</a>  <span class="com">// The owner that watchers and cleanups created now belong to.</span>
+<a class="ln" id="L64" href="#L64">64</a>  owner: <span class="ty">Ref</span>(u64),
+<a class="ln" id="L65" href="#L65">65</a>  <span class="com">// signal → the watchers that read it in their last run; watcher → the signals it read.</span>
+<a class="ln" id="L66" href="#L66">66</a>  readers: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(u64))),
+<a class="ln" id="L67" href="#L67">67</a>  <span class="com">// (signal, watcher) → 1 while the watcher reads the signal, 2 once it stopped but still stands in</span>
+<a class="ln" id="L68" href="#L68">68</a>  <span class="com">// the signal's `readers`, 3 once it was dropped from there. Absent: never read it.</span>
+<a class="ln" id="L69" href="#L69">69</a>  reading: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, u64)),
+<a class="ln" id="L70" href="#L70">70</a>  <span class="com">// id → the name `label` gave it, for `graph`.</span>
+<a class="ln" id="L71" href="#L71">71</a>  names: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">Text</span>)),
+<a class="ln" id="L72" href="#L72">72</a>  sources: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(u64))),
+<a class="ln" id="L73" href="#L73">73</a>  <span class="com">// watcher → its function; a disposed watcher maps to `None`.</span>
+<a class="ln" id="L74" href="#L74">74</a>  watchers: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">Option</span>(<a href="#L27"><span class="ty">Watcher</span></a>))),
+<a class="ln" id="L75" href="#L75">75</a>  <span class="com">// owner → the owners and watchers created under it, newest first. A watcher is the owner</span>
+<a class="ln" id="L76" href="#L76">76</a>  <span class="com">// of what its run creates.</span>
+<a class="ln" id="L77" href="#L77">77</a>  children: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(u64))),
+<a class="ln" id="L78" href="#L78">78</a>  <span class="com">// owner or watcher → the owner it was created under, so that ending it takes it out of</span>
+<a class="ln" id="L79" href="#L79">79</a>  <span class="com">// that owner's `children`.</span>
+<a class="ln" id="L80" href="#L80">80</a>  parents: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, u64)),
+<a class="ln" id="L81" href="#L81">81</a>  <span class="com">// signal → how many watchers read it now (state 1 in `reading`). A signal no watcher reads</span>
+<a class="ln" id="L82" href="#L82">82</a>  <span class="com">// any more is taken out of `readers` and `reading`, so that a signal that ends with its part</span>
+<a class="ln" id="L83" href="#L83">83</a>  <span class="com">// leaves nothing behind.</span>
+<a class="ln" id="L84" href="#L84">84</a>  live: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, u64)),
+<a class="ln" id="L85" href="#L85">85</a>  <span class="com">// owner → its cleanups, newest first.</span>
+<a class="ln" id="L86" href="#L86">86</a>  cleanups: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(<a href="#L28"><span class="ty">Cleanup</span></a>))),
+<a class="ln" id="L87" href="#L87">87</a>  <span class="com">// Watchers to run again once the current write is done, newest first, and whether each is</span>
+<a class="ln" id="L88" href="#L88">88</a>  <span class="com">// queued.</span>
+<a class="ln" id="L89" href="#L89">89</a>  pending: <span class="ty">Ref</span>(<span class="ty">List</span>(u64)),
+<a class="ln" id="L90" href="#L90">90</a>  queued: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">Bool</span>)),
+<a class="ln" id="L91" href="#L91">91</a>  <span class="com">// Whether a write is already running the pending watchers.</span>
+<a class="ln" id="L92" href="#L92">92</a>  flushing: <span class="ty">Ref</span>(<span class="ty">Bool</span>),
+<a class="ln" id="L93" href="#L93">93</a>  <span class="com">// watcher → how many times the current write has run it.</span>
+<a class="ln" id="L94" href="#L94">94</a>  runs: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, u64)),
+<a class="ln" id="L95" href="#L95">95</a>  <span class="com">// The watchers writes stopped running again since `take_stalled`, newest first.</span>
+<a class="ln" id="L96" href="#L96">96</a>  stalled: <span class="ty">Ref</span>(<span class="ty">List</span>(u64)),
+<a class="ln" id="L97" href="#L97">97</a>  <span class="com">// The timers asked for since the renderer last took them, newest first.</span>
+<a class="ln" id="L98" href="#L98">98</a>  timers: <span class="ty">Ref</span>(<span class="ty">List</span>(<a href="#L32"><span class="ty">Timer</span></a>)),
+<a class="ln" id="L99" href="#L99">99</a>  <span class="com">// Why the host gave up on a call into the runtime since `take_failures`, newest first.</span>
+<a class="ln" id="L100" href="#L100">100</a>  failures: <span class="ty">Ref</span>(<span class="ty">List</span>(<span class="ty">Text</span>)),
+<a class="ln" id="L101" href="#L101">101</a>  <span class="com">// id → a function kept for the host to run later (an event's handler). A tree names its</span>
+<a class="ln" id="L102" href="#L102">102</a>  <span class="com">// handlers by these ids, so it holds no function that may hold the tree.</span>
+<a class="ln" id="L103" href="#L103">103</a>  held: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <a href="#L27"><span class="ty">Watcher</span></a>))
+<a class="ln" id="L104" href="#L104">104</a>}
+<a class="ln" id="L105" href="#L105">105</a>
+<a class="ln" id="L106" href="#L106">106</a><span class="kw">effect</span> <span class="fn">access_runtime</span>(): <a href="#L56"><span class="ty">Runtime</span></a> <span class="kw">direct</span>
+<a class="ln" id="L107" href="#L107">107</a>
+<a class="ln" id="L108" href="#L108">108</a><span class="com">// Accessing the runtime may acquire one of its tables; only the host answers wait.</span>
+<a class="ln" id="L109" href="#L109">109</a><span class="com">// The cells the runtime keeps its tables in: making, reading and writing a `Ref` or a</span>
+<a class="ln" id="L110" href="#L110">110</a><span class="com">// `Mutex` are effects the host answers, and so is the seed a table hashes its keys under.</span>
+<a class="ln" id="L111" href="#L111">111</a><span class="kw">pub</span> <span class="kw">effect</span> cells {
+<a class="ln" id="L112" href="#L112">112</a>  ref_new,
+<a class="ln" id="L113" href="#L113">113</a>  ref_get,
+<a class="ln" id="L114" href="#L114">114</a>  ref_set,
+<a class="ln" id="L115" href="#L115">115</a>  weak_of,
+<a class="ln" id="L116" href="#L116">116</a>  weak_get,
+<a class="ln" id="L117" href="#L117">117</a>  mutex_new,
+<a class="ln" id="L118" href="#L118">118</a>  mutex_claim,
+<a class="ln" id="L119" href="#L119">119</a>  mutex_take_claimed,
+<a class="ln" id="L120" href="#L120">120</a>  mutex_put,
+<a class="ln" id="L121" href="#L121">121</a>  hash_seed
+<a class="ln" id="L122" href="#L122">122</a>}
+<a class="ln" id="L123" href="#L123">123</a>
+<a class="ln" id="L124" href="#L124">124</a><span class="kw">pub</span> <span class="kw">effect</span> rt { access_runtime, wait, div, overflow, cells }
+<a class="ln" id="L125" href="#L125">125</a>
+<a class="ln" id="L126" href="#L126">126</a><span class="com">// A value that the runtime watches. `get` inside a watcher subscribes it to the signal.</span>
+<a class="ln" id="L127" href="#L127">127</a><span class="kw">pub</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">Signal</span>(<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>) { id: u64, cell: <span class="ty">Ref</span>(<span class="ty">T</span>) }
+<a class="ln" id="L128" href="#L128">128</a>
+<a class="ln" id="L129" href="#L129">129</a><span class="com">// ---- tables of ids ------------------------------------------------------------------------</span>
+<a class="ln" id="L130" href="#L130">130</a>
+<a class="ln" id="L131" href="#L131">131</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">alone_with</span>&lt;<span class="ty">A</span>, <span class="ty">R</span>&gt;(<span class="var">m</span>: <span class="ty">Mutex</span>(<span class="ty">A</span>), <span class="var">f</span>: &amp;((<span class="var">x</span>: &amp;<span class="kw">mut</span> <span class="ty">A</span>) -&gt; <span class="ty">R</span>)): <span class="ty">R</span> ! {wait, mutex_claim} {
+<a class="ln" id="L132" href="#L132">132</a>  <span class="kw">var</span> guard := <span class="fn">Mutex::lock</span>(m)
+<a class="ln" id="L133" href="#L133">133</a>  <span class="fn">f</span>(<span class="fn">MutexGuard::get_mut</span>(&amp;<span class="kw">mut</span> guard))
+<a class="ln" id="L134" href="#L134">134</a>}
+<a class="ln" id="L135" href="#L135">135</a>
+<a class="ln" id="L136" href="#L136">136</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">own</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">x</span>: &amp;<span class="ty">A</span>): <span class="ty">A</span> { x }
+<a class="ln" id="L137" href="#L137">137</a>
+<a class="ln" id="L138" href="#L138">138</a><span class="kw">fn</span> <span class="fn">has_id</span>(<span class="var">l</span>: <span class="ty">List</span>(u64), <span class="var">x</span>: u64): <span class="ty">Bool</span> {
+<a class="ln" id="L139" href="#L139">139</a>  <span class="kw">match</span> l {
+<a class="ln" id="L140" href="#L140">140</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L141" href="#L141">141</a>    <span class="ty">Cons</span>(y, t) =&gt; <span class="kw">if</span> y == x { <span class="kw">true</span> } <span class="kw">else</span> { <a href="#L138"><span class="fn">has_id</span></a>(t, x) }
+<a class="ln" id="L142" href="#L142">142</a>  }
+<a class="ln" id="L143" href="#L143">143</a>}
+<a class="ln" id="L144" href="#L144">144</a>
+<a class="ln" id="L145" href="#L145">145</a><span class="kw">fn</span> <span class="fn">without_id</span>(<span class="var">l</span>: <span class="ty">List</span>(u64), <span class="var">x</span>: u64): <span class="ty">List</span>(u64) {
+<a class="ln" id="L146" href="#L146">146</a>  <span class="kw">match</span> l {
+<a class="ln" id="L147" href="#L147">147</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L148" href="#L148">148</a>    <span class="ty">Cons</span>(y, t) =&gt; <span class="kw">if</span> y == x { <a href="#L145"><span class="fn">without_id</span></a>(t, x) } <span class="kw">else</span> { <span class="ty">Cons</span>(y, <a href="#L145"><span class="fn">without_id</span></a>(t, x)) }
+<a class="ln" id="L149" href="#L149">149</a>  }
+<a class="ln" id="L150" href="#L150">150</a>}
+<a class="ln" id="L151" href="#L151">151</a>
+<a class="ln" id="L152" href="#L152">152</a><span class="kw">fn</span> <span class="fn">reverse_ids</span>(<span class="var">l</span>: <span class="ty">List</span>(u64), <span class="var">acc</span>: <span class="ty">List</span>(u64)): <span class="ty">List</span>(u64) {
+<a class="ln" id="L153" href="#L153">153</a>  <span class="kw">match</span> l {
+<a class="ln" id="L154" href="#L154">154</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L155" href="#L155">155</a>    <span class="ty">Cons</span>(x, t) =&gt; <a href="#L152"><span class="fn">reverse_ids</span></a>(t, <span class="ty">Cons</span>(x, acc))
+<a class="ln" id="L156" href="#L156">156</a>  }
+<a class="ln" id="L157" href="#L157">157</a>}
+<a class="ln" id="L158" href="#L158">158</a>
+<a class="ln" id="L159" href="#L159">159</a><span class="kw">fn</span> <span class="fn">ids_at</span>(<span class="var">t</span>: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(u64))), <span class="var">k</span>: u64): <span class="ty">List</span>(u64) ! {wait, mutex_claim} {
+<a class="ln" id="L160" href="#L160">160</a>  <a href="#L131"><span class="fn">alone_with</span></a>(t, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;k) {
+<a class="ln" id="L161" href="#L161">161</a>    <span class="ty">None</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L162" href="#L162">162</a>    <span class="ty">Some</span>(l) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;l)
+<a class="ln" id="L163" href="#L163">163</a>  })
+<a class="ln" id="L164" href="#L164">164</a>}
+<a class="ln" id="L165" href="#L165">165</a>
+<a class="ln" id="L166" href="#L166">166</a><span class="com">// An empty list is not kept, so that an id that ends leaves nothing in the table.</span>
+<a class="ln" id="L167" href="#L167">167</a><span class="kw">fn</span> <span class="fn">set_ids</span>(<span class="var">t</span>: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(u64))), <span class="var">k</span>: u64, <span class="var">l</span>: <span class="ty">List</span>(u64)): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L168" href="#L168">168</a>  <a href="#L131"><span class="fn">alone_with</span></a>(t, (m) =&gt; {
+<a class="ln" id="L169" href="#L169">169</a>    <span class="kw">match</span> l {
+<a class="ln" id="L170" href="#L170">170</a>      <span class="ty">Nil</span> =&gt; { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;k); #() }
+<a class="ln" id="L171" href="#L171">171</a>      <span class="ty">Cons</span>(_, _) =&gt; { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, k, l); #() }
+<a class="ln" id="L172" href="#L172">172</a>    }
+<a class="ln" id="L173" href="#L173">173</a>  })
+<a class="ln" id="L174" href="#L174">174</a>}
+<a class="ln" id="L175" href="#L175">175</a>
+<a class="ln" id="L176" href="#L176">176</a><span class="kw">fn</span> <span class="fn">push_id</span>(<span class="var">t</span>: <span class="ty">Mutex</span>(<span class="ty">HashMap</span>(u64, <span class="ty">List</span>(u64))), <span class="var">k</span>: u64, <span class="var">x</span>: u64): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L177" href="#L177">177</a>  <a href="#L167"><span class="fn">set_ids</span></a>(t, k, <span class="ty">Cons</span>(x, <a href="#L159"><span class="fn">ids_at</span></a>(t, k)))
+<a class="ln" id="L178" href="#L178">178</a>}
+<a class="ln" id="L179" href="#L179">179</a>
+<a class="ln" id="L180" href="#L180">180</a><span class="kw">fn</span> <span class="fn">is_queued</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64): <span class="ty">Bool</span> ! {wait, mutex_claim} {
+<a class="ln" id="L181" href="#L181">181</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.queued, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;w) {
+<a class="ln" id="L182" href="#L182">182</a>    <span class="ty">None</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L183" href="#L183">183</a>    <span class="ty">Some</span>(b) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;b)
+<a class="ln" id="L184" href="#L184">184</a>  })
+<a class="ln" id="L185" href="#L185">185</a>}
+<a class="ln" id="L186" href="#L186">186</a>
+<a class="ln" id="L187" href="#L187">187</a><span class="kw">fn</span> <span class="fn">set_queued</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64, <span class="var">b</span>: <span class="ty">Bool</span>): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L188" href="#L188">188</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.queued, (m) =&gt; {
+<a class="ln" id="L189" href="#L189">189</a>    <span class="kw">if</span> b { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, w, b); #() } <span class="kw">else</span> { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;w); #() }
+<a class="ln" id="L190" href="#L190">190</a>  })
+<a class="ln" id="L191" href="#L191">191</a>}
+<a class="ln" id="L192" href="#L192">192</a>
+<a class="ln" id="L193" href="#L193">193</a><span class="com">// Forgets what `w` read in its last run.</span>
+<a class="ln" id="L194" href="#L194">194</a><span class="kw">fn</span> <span class="fn">unsubscribe</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64): <span class="ty">Unit</span> ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L195" href="#L195">195</a>  <a href="#L199"><span class="fn">drop_reader</span></a>(r, <a href="#L159"><span class="fn">ids_at</span></a>(r.sources, w), w)
+<a class="ln" id="L196" href="#L196">196</a>  <a href="#L167"><span class="fn">set_ids</span></a>(r.sources, w, <span class="ty">Nil</span>)
+<a class="ln" id="L197" href="#L197">197</a>}
+<a class="ln" id="L198" href="#L198">198</a>
+<a class="ln" id="L199" href="#L199">199</a><span class="kw">fn</span> <span class="fn">drop_reader</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">sources</span>: <span class="ty">List</span>(u64), <span class="var">w</span>: u64): <span class="ty">Unit</span> ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L200" href="#L200">200</a>  <span class="kw">match</span> sources {
+<a class="ln" id="L201" href="#L201">201</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L202" href="#L202">202</a>    <span class="ty">Cons</span>(s, rest) =&gt; {
+<a class="ln" id="L203" href="#L203">203</a>      <a href="#L251"><span class="fn">set_reading</span></a>(r, s, w, <span class="num">2</span>)
+<a class="ln" id="L204" href="#L204">204</a>      <span class="kw">if</span> <a href="#L213"><span class="fn">add_live</span></a>(r, s, <span class="kw">false</span>) == <span class="num">0</span> { <a href="#L226"><span class="fn">forget_readers</span></a>(r, s) } <span class="kw">else</span> { #() }
+<a class="ln" id="L205" href="#L205">205</a>      <a href="#L199"><span class="fn">drop_reader</span></a>(r, rest, w)
+<a class="ln" id="L206" href="#L206">206</a>    }
+<a class="ln" id="L207" href="#L207">207</a>  }
+<a class="ln" id="L208" href="#L208">208</a>}
+<a class="ln" id="L209" href="#L209">209</a>
+<a class="ln" id="L210" href="#L210">210</a><span class="kw">fn</span> <span class="fn">reading_key</span>(<span class="var">s</span>: u64, <span class="var">w</span>: u64): u64 ! {overflow} { s * <span class="num">4294967296</span> + w }
+<a class="ln" id="L211" href="#L211">211</a>
+<a class="ln" id="L212" href="#L212">212</a><span class="com">// One more (`up`) or one fewer watcher reads `s`; answers how many read it now.</span>
+<a class="ln" id="L213" href="#L213">213</a><span class="kw">fn</span> <span class="fn">add_live</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">s</span>: u64, <span class="var">up</span>: <span class="ty">Bool</span>): u64 ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L214" href="#L214">214</a>  <span class="kw">let</span> n := <a href="#L131"><span class="fn">alone_with</span></a>(r.live, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;s) {
+<a class="ln" id="L215" href="#L215">215</a>    <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L216" href="#L216">216</a>    <span class="ty">Some</span>(x) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;x)
+<a class="ln" id="L217" href="#L217">217</a>  })
+<a class="ln" id="L218" href="#L218">218</a>  <span class="kw">let</span> next := <span class="kw">if</span> up { n + <span class="num">1</span> } <span class="kw">else</span> <span class="kw">if</span> n == <span class="num">0</span> { <span class="num">0</span> } <span class="kw">else</span> { n - <span class="num">1</span> }
+<a class="ln" id="L219" href="#L219">219</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.live, (m) =&gt; {
+<a class="ln" id="L220" href="#L220">220</a>    <span class="kw">if</span> next == <span class="num">0</span> { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;s); #() } <span class="kw">else</span> { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, s, next); #() }
+<a class="ln" id="L221" href="#L221">221</a>  })
+<a class="ln" id="L222" href="#L222">222</a>  next
+<a class="ln" id="L223" href="#L223">223</a>}
+<a class="ln" id="L224" href="#L224">224</a>
+<a class="ln" id="L225" href="#L225">225</a><span class="com">// No watcher reads `s` now: what `readers` and `reading` keep for it goes.</span>
+<a class="ln" id="L226" href="#L226">226</a><span class="kw">fn</span> <span class="fn">forget_readers</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">s</span>: u64): <span class="ty">Unit</span> ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L227" href="#L227">227</a>  <a href="#L231"><span class="fn">forget_each</span></a>(r, s, <a href="#L159"><span class="fn">ids_at</span></a>(r.readers, s))
+<a class="ln" id="L228" href="#L228">228</a>  <a href="#L167"><span class="fn">set_ids</span></a>(r.readers, s, <span class="ty">Nil</span>)
+<a class="ln" id="L229" href="#L229">229</a>}
+<a class="ln" id="L230" href="#L230">230</a>
+<a class="ln" id="L231" href="#L231">231</a><span class="kw">fn</span> <span class="fn">forget_each</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">s</span>: u64, <span class="var">l</span>: <span class="ty">List</span>(u64)): <span class="ty">Unit</span> ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L232" href="#L232">232</a>  <span class="kw">match</span> l {
+<a class="ln" id="L233" href="#L233">233</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L234" href="#L234">234</a>    <span class="ty">Cons</span>(w, rest) =&gt; {
+<a class="ln" id="L235" href="#L235">235</a>      <a href="#L251"><span class="fn">set_reading</span></a>(r, s, w, <span class="num">0</span>)
+<a class="ln" id="L236" href="#L236">236</a>      <a href="#L231"><span class="fn">forget_each</span></a>(r, s, rest)
+<a class="ln" id="L237" href="#L237">237</a>    }
+<a class="ln" id="L238" href="#L238">238</a>  }
+<a class="ln" id="L239" href="#L239">239</a>}
+<a class="ln" id="L240" href="#L240">240</a>
+<a class="ln" id="L241" href="#L241">241</a><span class="kw">fn</span> <span class="fn">reading_of</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">s</span>: u64, <span class="var">w</span>: u64): u64 ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L242" href="#L242">242</a>  <span class="kw">let</span> key := <a href="#L210"><span class="fn">reading_key</span></a>(s, w)
+<a class="ln" id="L243" href="#L243">243</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.reading, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;key) {
+<a class="ln" id="L244" href="#L244">244</a>    <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L245" href="#L245">245</a>    <span class="ty">Some</span>(n) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;n)
+<a class="ln" id="L246" href="#L246">246</a>  })
+<a class="ln" id="L247" href="#L247">247</a>}
+<a class="ln" id="L248" href="#L248">248</a>
+<a class="ln" id="L249" href="#L249">249</a><span class="com">// 3 (dropped from the signal's readers) is kept as no entry, which reads as 0: the watcher</span>
+<a class="ln" id="L250" href="#L250">250</a><span class="com">// is not among the readers either way.</span>
+<a class="ln" id="L251" href="#L251">251</a><span class="kw">fn</span> <span class="fn">set_reading</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">s</span>: u64, <span class="var">w</span>: u64, <span class="var">n</span>: u64): <span class="ty">Unit</span> ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L252" href="#L252">252</a>  <span class="kw">let</span> key := <a href="#L210"><span class="fn">reading_key</span></a>(s, w)
+<a class="ln" id="L253" href="#L253">253</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.reading, (m) =&gt; {
+<a class="ln" id="L254" href="#L254">254</a>    <span class="kw">if</span> n == <span class="num">3</span> || n == <span class="num">0</span> { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;key); #() } <span class="kw">else</span> { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, key, n); #() }
+<a class="ln" id="L255" href="#L255">255</a>  })
+<a class="ln" id="L256" href="#L256">256</a>}
+<a class="ln" id="L257" href="#L257">257</a>
+<a class="ln" id="L258" href="#L258">258</a><span class="com">// The watchers that read the signal `s` now, oldest first. A watcher that stopped reading it</span>
+<a class="ln" id="L259" href="#L259">259</a><span class="com">// stays in the list until here, so that stopping costs nothing; this also drops it.</span>
+<a class="ln" id="L260" href="#L260">260</a><span class="kw">fn</span> <span class="fn">live_readers</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">s</span>: u64): <span class="ty">List</span>(u64) ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L261" href="#L261">261</a>  <span class="kw">let</span> oldest := <a href="#L266"><span class="fn">keep_live</span></a>(r, s, <a href="#L159"><span class="fn">ids_at</span></a>(r.readers, s), <span class="ty">Nil</span>)
+<a class="ln" id="L262" href="#L262">262</a>  <a href="#L167"><span class="fn">set_ids</span></a>(r.readers, s, <a href="#L152"><span class="fn">reverse_ids</span></a>(oldest, <span class="ty">Nil</span>))
+<a class="ln" id="L263" href="#L263">263</a>  oldest
+<a class="ln" id="L264" href="#L264">264</a>}
+<a class="ln" id="L265" href="#L265">265</a>
+<a class="ln" id="L266" href="#L266">266</a><span class="kw">fn</span> <span class="fn">keep_live</span>(
+<a class="ln" id="L267" href="#L267">267</a>  <span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>,
+<a class="ln" id="L268" href="#L268">268</a>  <span class="var">s</span>: u64,
+<a class="ln" id="L269" href="#L269">269</a>  <span class="var">l</span>: <span class="ty">List</span>(u64),
+<a class="ln" id="L270" href="#L270">270</a>  <span class="var">acc</span>: <span class="ty">List</span>(u64)
+<a class="ln" id="L271" href="#L271">271</a>): <span class="ty">List</span>(u64) ! {wait, overflow, mutex_claim} {
+<a class="ln" id="L272" href="#L272">272</a>  <span class="kw">match</span> l {
+<a class="ln" id="L273" href="#L273">273</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L274" href="#L274">274</a>    <span class="ty">Cons</span>(w, t) =&gt; {
+<a class="ln" id="L275" href="#L275">275</a>      <span class="kw">let</span> n := <a href="#L241"><span class="fn">reading_of</span></a>(r, s, w)
+<a class="ln" id="L276" href="#L276">276</a>      <span class="kw">if</span> n == <span class="num">1</span> { <a href="#L266"><span class="fn">keep_live</span></a>(r, s, t, <span class="ty">Cons</span>(w, acc)) } <span class="kw">else</span> {
+<a class="ln" id="L277" href="#L277">277</a>        <span class="kw">if</span> n == <span class="num">2</span> { <a href="#L251"><span class="fn">set_reading</span></a>(r, s, w, <span class="num">3</span>) } <span class="kw">else</span> { #() }
+<a class="ln" id="L278" href="#L278">278</a>        <a href="#L266"><span class="fn">keep_live</span></a>(r, s, t, acc)
+<a class="ln" id="L279" href="#L279">279</a>      }
+<a class="ln" id="L280" href="#L280">280</a>    }
+<a class="ln" id="L281" href="#L281">281</a>  }
+<a class="ln" id="L282" href="#L282">282</a>}
+<a class="ln" id="L283" href="#L283">283</a>
+<a class="ln" id="L284" href="#L284">284</a><span class="kw">fn</span> <span class="fn">find_watcher</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64): <span class="ty">Option</span>(<a href="#L27"><span class="ty">Watcher</span></a>) ! {wait, mutex_claim} {
+<a class="ln" id="L285" href="#L285">285</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.watchers, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;w) {
+<a class="ln" id="L286" href="#L286">286</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L287" href="#L287">287</a>    <span class="ty">Some</span>(x) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;x)
+<a class="ln" id="L288" href="#L288">288</a>  })
+<a class="ln" id="L289" href="#L289">289</a>}
+<a class="ln" id="L290" href="#L290">290</a>
+<a class="ln" id="L291" href="#L291">291</a><span class="com">// A disposed watcher is kept as no entry, which `find_watcher` reads as `None`.</span>
+<a class="ln" id="L292" href="#L292">292</a><span class="kw">fn</span> <span class="fn">set_watcher</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64, <span class="var">x</span>: <span class="ty">Option</span>(<a href="#L27"><span class="ty">Watcher</span></a>)): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L293" href="#L293">293</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.watchers, (m) =&gt; {
+<a class="ln" id="L294" href="#L294">294</a>    <span class="kw">match</span> x {
+<a class="ln" id="L295" href="#L295">295</a>      <span class="ty">None</span> =&gt; { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;w); #() }
+<a class="ln" id="L296" href="#L296">296</a>      <span class="ty">Some</span>(v) =&gt; { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, w, <span class="ty">Some</span>(v)); #() }
+<a class="ln" id="L297" href="#L297">297</a>    }
+<a class="ln" id="L298" href="#L298">298</a>  })
+<a class="ln" id="L299" href="#L299">299</a>}
+<a class="ln" id="L300" href="#L300">300</a>
+<a class="ln" id="L301" href="#L301">301</a><span class="kw">fn</span> <span class="fn">cleanups_at</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">o</span>: u64): <span class="ty">List</span>(<a href="#L28"><span class="ty">Cleanup</span></a>) ! {wait, mutex_claim} {
+<a class="ln" id="L302" href="#L302">302</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.cleanups, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;o) {
+<a class="ln" id="L303" href="#L303">303</a>    <span class="ty">None</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L304" href="#L304">304</a>    <span class="ty">Some</span>(l) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;l)
+<a class="ln" id="L305" href="#L305">305</a>  })
+<a class="ln" id="L306" href="#L306">306</a>}
+<a class="ln" id="L307" href="#L307">307</a>
+<a class="ln" id="L308" href="#L308">308</a><span class="kw">fn</span> <span class="fn">set_cleanups</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">o</span>: u64, <span class="var">l</span>: <span class="ty">List</span>(<a href="#L28"><span class="ty">Cleanup</span></a>)): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L309" href="#L309">309</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.cleanups, (m) =&gt; {
+<a class="ln" id="L310" href="#L310">310</a>    <span class="kw">match</span> l {
+<a class="ln" id="L311" href="#L311">311</a>      <span class="ty">Nil</span> =&gt; { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;o); #() }
+<a class="ln" id="L312" href="#L312">312</a>      <span class="ty">Cons</span>(_, _) =&gt; { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, o, l); #() }
+<a class="ln" id="L313" href="#L313">313</a>    }
+<a class="ln" id="L314" href="#L314">314</a>  })
+<a class="ln" id="L315" href="#L315">315</a>}
+<a class="ln" id="L316" href="#L316">316</a>
+<a class="ln" id="L317" href="#L317">317</a><span class="com">// ---- functions kept for later ----</span>
+<a class="ln" id="L318" href="#L318">318</a>
+<a class="ln" id="L319" href="#L319">319</a><span class="com">// Keeps `f` in the runtime until `release`, and gives the id `run_held` runs it by.</span>
+<a class="ln" id="L320" href="#L320">320</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">hold</span>(<span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): u64 ! {rt} {
+<a class="ln" id="L321" href="#L321">321</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L322" href="#L322">322</a>  <span class="kw">let</span> id := <a href="#L345"><span class="fn">fresh</span></a>(r)
+<a class="ln" id="L323" href="#L323">323</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.held, (m) =&gt; { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, id, <span class="ty">Watcher</span> { id: id, run: f }); #() })
+<a class="ln" id="L324" href="#L324">324</a>  id
+<a class="ln" id="L325" href="#L325">325</a>}
+<a class="ln" id="L326" href="#L326">326</a>
+<a class="ln" id="L327" href="#L327">327</a><span class="com">// Runs what `hold` kept under `id`, if it is still kept.</span>
+<a class="ln" id="L328" href="#L328">328</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">run_held</span>(<span class="var">id</span>: u64): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L329" href="#L329">329</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L330" href="#L330">330</a>  <span class="kw">let</span> found: <span class="ty">Option</span>(<a href="#L27"><span class="ty">Watcher</span></a>) := <a href="#L131"><span class="fn">alone_with</span></a>(r.held, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;id) {
+<a class="ln" id="L331" href="#L331">331</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L332" href="#L332">332</a>    <span class="ty">Some</span>(x) =&gt; <span class="ty">Some</span>(<a href="#L136"><span class="fn">own</span></a>(&amp;x))
+<a class="ln" id="L333" href="#L333">333</a>  })
+<a class="ln" id="L334" href="#L334">334</a>  <span class="kw">match</span> found { <span class="ty">Some</span>(w) =&gt; (w.run)(), <span class="ty">None</span> =&gt; #() }
+<a class="ln" id="L335" href="#L335">335</a>}
+<a class="ln" id="L336" href="#L336">336</a>
+<a class="ln" id="L337" href="#L337">337</a><span class="com">// Forgets what `hold` kept under `id`.</span>
+<a class="ln" id="L338" href="#L338">338</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">release</span>(<span class="var">id</span>: u64): <span class="ty">Unit</span> ! {rt} {
+<a class="ln" id="L339" href="#L339">339</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L340" href="#L340">340</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.held, (m) =&gt; { <span class="kw">let</span> gone := <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;id); #() })
+<a class="ln" id="L341" href="#L341">341</a>}
+<a class="ln" id="L342" href="#L342">342</a>
+<a class="ln" id="L343" href="#L343">343</a><span class="com">// ---- the runtime --------------------------------------------------------------------------</span>
+<a class="ln" id="L344" href="#L344">344</a>
+<a class="ln" id="L345" href="#L345">345</a><span class="kw">fn</span> <span class="fn">fresh</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>): u64 ! {overflow, ref_get, ref_set} {
+<a class="ln" id="L346" href="#L346">346</a>  <span class="kw">let</span> n := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.next)
+<a class="ln" id="L347" href="#L347">347</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.next, n + <span class="num">1</span>)
+<a class="ln" id="L348" href="#L348">348</a>  n
+<a class="ln" id="L349" href="#L349">349</a>}
+<a class="ln" id="L350" href="#L350">350</a>
+<a class="ln" id="L351" href="#L351">351</a><span class="com">// The id of the root owner.</span>
+<a class="ln" id="L352" href="#L352">352</a><span class="kw">fn</span> <span class="fn">root_owner</span>(): u64 { <span class="num">0</span> }
+<a class="ln" id="L353" href="#L353">353</a>
+<a class="ln" id="L354" href="#L354">354</a><span class="kw">fn</span> <span class="fn">new_runtime</span>(): <a href="#L56"><span class="ty">Runtime</span></a> ! {mutex_new, ref_new, hash_seed} {
+<a class="ln" id="L355" href="#L355">355</a>  <span class="ty">Runtime</span> {
+<a class="ln" id="L356" href="#L356">356</a>    wants: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L357" href="#L357">357</a>    next: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="num">1</span>),
+<a class="ln" id="L358" href="#L358">358</a>    observer: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">None</span>),
+<a class="ln" id="L359" href="#L359">359</a>    owner: <span class="kw">perform</span> <span class="fn">ref_new</span>(<a href="#L352"><span class="fn">root_owner</span></a>()),
+<a class="ln" id="L360" href="#L360">360</a>    readers: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L361" href="#L361">361</a>    reading: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L362" href="#L362">362</a>    names: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L363" href="#L363">363</a>    sources: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L364" href="#L364">364</a>    watchers: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L365" href="#L365">365</a>    children: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L366" href="#L366">366</a>    parents: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L367" href="#L367">367</a>    live: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L368" href="#L368">368</a>    cleanups: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L369" href="#L369">369</a>    pending: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L370" href="#L370">370</a>    queued: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L371" href="#L371">371</a>    flushing: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">false</span>),
+<a class="ln" id="L372" href="#L372">372</a>    runs: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>()),
+<a class="ln" id="L373" href="#L373">373</a>    stalled: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L374" href="#L374">374</a>    timers: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L375" href="#L375">375</a>    failures: <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="ty">Nil</span>),
+<a class="ln" id="L376" href="#L376">376</a>    held: <span class="kw">perform</span> <span class="fn">mutex_new</span>(<span class="fn">HashMap::new</span>())
+<a class="ln" id="L377" href="#L377">377</a>  }
+<a class="ln" id="L378" href="#L378">378</a>}
+<a class="ln" id="L379" href="#L379">379</a>
+<a class="ln" id="L380" href="#L380">380</a><span class="com">// Runs `body` with a reactive runtime of its own.</span>
+<a class="ln" id="L381" href="#L381">381</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">reactive</span>&lt;<span class="ty">T</span>, !e&gt;(<span class="var">body</span>: &amp;(() -&gt; <span class="ty">T</span> ! {rt} ∪ e)): <span class="ty">T</span> ! {div, wait, overflow, cells} ∪ e {
+<a class="ln" id="L382" href="#L382">382</a>  <span class="kw">let</span> r := <a href="#L354"><span class="fn">new_runtime</span></a>()
+<a class="ln" id="L383" href="#L383">383</a>  <span class="kw">handle</span> { <span class="fn">body</span>() } <span class="kw">with</span> {
+<a class="ln" id="L384" href="#L384">384</a>    <span class="fn">access_runtime</span>(), k =&gt; <span class="fn">k</span>(r)
+<a class="ln" id="L385" href="#L385">385</a>    <span class="kw">return</span> v =&gt; v
+<a class="ln" id="L386" href="#L386">386</a>  }
+<a class="ln" id="L387" href="#L387">387</a>}
+<a class="ln" id="L388" href="#L388">388</a>
+<a class="ln" id="L389" href="#L389">389</a><span class="com">// The runtime the caller runs in, for code the host calls later (an event listener) to</span>
+<a class="ln" id="L390" href="#L390">390</a><span class="com">// run in again with `with_runtime`.</span>
+<a class="ln" id="L391" href="#L391">391</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">current</span>(): <a href="#L56"><span class="ty">Runtime</span></a> ! {rt} { <span class="kw">perform</span> <span class="fn">access_runtime</span>() }
+<a class="ln" id="L392" href="#L392">392</a>
+<a class="ln" id="L393" href="#L393">393</a><span class="com">// Runs `body` in the runtime `r`, which `current` gave.</span>
+<a class="ln" id="L394" href="#L394">394</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">with_runtime</span>&lt;<span class="ty">T</span>, !e&gt;(
+<a class="ln" id="L395" href="#L395">395</a>  <span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>,
+<a class="ln" id="L396" href="#L396">396</a>  <span class="var">body</span>: &amp;(() -&gt; <span class="ty">T</span> ! {rt} ∪ e)
+<a class="ln" id="L397" href="#L397">397</a>): <span class="ty">T</span> ! {div, wait, overflow, cells} ∪ e {
+<a class="ln" id="L398" href="#L398">398</a>  <span class="kw">handle</span> { <span class="fn">body</span>() } <span class="kw">with</span> {
+<a class="ln" id="L399" href="#L399">399</a>    <span class="fn">access_runtime</span>(), k =&gt; <span class="fn">k</span>(r)
+<a class="ln" id="L400" href="#L400">400</a>    <span class="kw">return</span> v =&gt; v
+<a class="ln" id="L401" href="#L401">401</a>  }
+<a class="ln" id="L402" href="#L402">402</a>}
+<a class="ln" id="L403" href="#L403">403</a>
+<a class="ln" id="L404" href="#L404">404</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">signal</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">v</span>: <span class="ty">T</span>): <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>) ! {rt} {
+<a class="ln" id="L405" href="#L405">405</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L406" href="#L406">406</a>  <span class="ty">delim::src::signal::Signal</span> { id: <a href="#L345"><span class="fn">fresh</span></a>(r), cell: <span class="kw">perform</span> <span class="fn">ref_new</span>(v) }
+<a class="ln" id="L407" href="#L407">407</a>}
+<a class="ln" id="L408" href="#L408">408</a>
+<a class="ln" id="L409" href="#L409">409</a><span class="com">// What a signal can be read through: the signal itself, or a `ReadSignal` of it.</span>
+<a class="ln" id="L410" href="#L410">410</a><span class="kw">pub</span> <span class="kw">class</span> <span class="ty">Readable</span>(<span class="ty">F</span>: (<span class="ty">Shared</span>) -&gt; <span class="ty">Shared</span>) {
+<a class="ln" id="L411" href="#L411">411</a>  <span class="kw">fn</span> <span class="fn">read</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <span class="ty">F</span>(<span class="ty">T</span>)): <span class="ty">T</span> ! {rt, overflow}
+<a class="ln" id="L412" href="#L412">412</a>  <span class="kw">fn</span> <span class="fn">look</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <span class="ty">F</span>(<span class="ty">T</span>)): <span class="ty">T</span> ! {ref_get}
+<a class="ln" id="L413" href="#L413">413</a>}
+<a class="ln" id="L414" href="#L414">414</a><span class="kw">instance</span> <span class="ty">Readable</span>(<span class="ty">delim::src::signal::Signal</span>) {
+<a class="ln" id="L415" href="#L415">415</a>  <span class="kw">fn</span> <span class="fn">read</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>)): <span class="ty">T</span> ! {rt} { <a href="#L442"><span class="fn">get_signal</span></a>(s) }
+<a class="ln" id="L416" href="#L416">416</a>  <span class="kw">fn</span> <span class="fn">look</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L417" href="#L417">417</a>    <span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>)
+<a class="ln" id="L418" href="#L418">418</a>  ): <span class="ty">T</span> ! {ref_get} { <span class="kw">perform</span> <span class="fn">ref_get</span>(s.cell) }
+<a class="ln" id="L419" href="#L419">419</a>}
+<a class="ln" id="L420" href="#L420">420</a>
+<a class="ln" id="L421" href="#L421">421</a><span class="com">// A signal that may be read but not written: `readonly(s)` hands out `s` to read only.</span>
+<a class="ln" id="L422" href="#L422">422</a><span class="kw">pub</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">ReadSignal</span>(<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>) { source: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>) }
+<a class="ln" id="L423" href="#L423">423</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">readonly</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L424" href="#L424">424</a>  <span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>)
+<a class="ln" id="L425" href="#L425">425</a>): <a href="#L422"><span class="ty">ReadSignal</span></a>(<span class="ty">T</span>) { <span class="ty">ReadSignal</span> { source: s } }
+<a class="ln" id="L426" href="#L426">426</a><span class="kw">instance</span> <span class="ty">Readable</span>(<a href="#L422"><span class="ty">ReadSignal</span></a>) {
+<a class="ln" id="L427" href="#L427">427</a>  <span class="kw">fn</span> <span class="fn">read</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <a href="#L422"><span class="ty">ReadSignal</span></a>(<span class="ty">T</span>)): <span class="ty">T</span> ! {rt} { <a href="#L442"><span class="fn">get_signal</span></a>(s.source) }
+<a class="ln" id="L428" href="#L428">428</a>  <span class="kw">fn</span> <span class="fn">look</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <a href="#L422"><span class="ty">ReadSignal</span></a>(<span class="ty">T</span>)): <span class="ty">T</span> ! {ref_get} { <span class="kw">perform</span> <span class="fn">ref_get</span>(s.source.cell) }
+<a class="ln" id="L429" href="#L429">429</a>}
+<a class="ln" id="L430" href="#L430">430</a>
+<a class="ln" id="L431" href="#L431">431</a><span class="com">// Reads the signal; inside a watcher, the watcher runs again when the signal changes. A</span>
+<a class="ln" id="L432" href="#L432">432</a><span class="com">// `ReadSignal` reads the same way.</span>
+<a class="ln" id="L433" href="#L433">433</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">get</span>&lt;<span class="ty">F</span>: (<span class="ty">Shared</span>) -&gt; <span class="ty">Shared</span>, <span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L434" href="#L434">434</a>  <span class="var">s</span>: <span class="ty">F</span>(<span class="ty">T</span>)
+<a class="ln" id="L435" href="#L435">435</a>): <span class="ty">T</span> ! {rt, overflow} <span class="kw">where</span> <span class="ty">Readable</span>(<span class="ty">F</span>) { <a href="#L411"><span class="fn">Readable::read</span></a>(s) }
+<a class="ln" id="L436" href="#L436">436</a>
+<a class="ln" id="L437" href="#L437">437</a><span class="com">// Reads the signal without subscribing.</span>
+<a class="ln" id="L438" href="#L438">438</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">peek</span>&lt;<span class="ty">F</span>: (<span class="ty">Shared</span>) -&gt; <span class="ty">Shared</span>, <span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L439" href="#L439">439</a>  <span class="var">s</span>: <span class="ty">F</span>(<span class="ty">T</span>)
+<a class="ln" id="L440" href="#L440">440</a>): <span class="ty">T</span> ! {ref_get} <span class="kw">where</span> <span class="ty">Readable</span>(<span class="ty">F</span>) { <a href="#L412"><span class="fn">Readable::look</span></a>(s) }
+<a class="ln" id="L441" href="#L441">441</a>
+<a class="ln" id="L442" href="#L442">442</a><span class="kw">fn</span> <span class="fn">get_signal</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>)): <span class="ty">T</span> ! {rt} {
+<a class="ln" id="L443" href="#L443">443</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L444" href="#L444">444</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(r.observer) {
+<a class="ln" id="L445" href="#L445">445</a>    <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L446" href="#L446">446</a>    <span class="ty">Some</span>(w) =&gt; {
+<a class="ln" id="L447" href="#L447">447</a>      <span class="kw">let</span> n := <a href="#L241"><span class="fn">reading_of</span></a>(r, s.id, w)
+<a class="ln" id="L448" href="#L448">448</a>      <span class="kw">if</span> n == <span class="num">1</span> { #() } <span class="kw">else</span> {
+<a class="ln" id="L449" href="#L449">449</a>        <span class="kw">if</span> n == <span class="num">2</span> { #() } <span class="kw">else</span> { <a href="#L176"><span class="fn">push_id</span></a>(r.readers, s.id, w) }
+<a class="ln" id="L450" href="#L450">450</a>        <a href="#L251"><span class="fn">set_reading</span></a>(r, s.id, w, <span class="num">1</span>)
+<a class="ln" id="L451" href="#L451">451</a>        <span class="kw">let</span> now := <a href="#L213"><span class="fn">add_live</span></a>(r, s.id, <span class="kw">true</span>)
+<a class="ln" id="L452" href="#L452">452</a>        <a href="#L176"><span class="fn">push_id</span></a>(r.sources, w, s.id)
+<a class="ln" id="L453" href="#L453">453</a>      }
+<a class="ln" id="L454" href="#L454">454</a>    }
+<a class="ln" id="L455" href="#L455">455</a>  }
+<a class="ln" id="L456" href="#L456">456</a>  <span class="kw">perform</span> <span class="fn">ref_get</span>(s.cell)
+<a class="ln" id="L457" href="#L457">457</a>}
+<a class="ln" id="L458" href="#L458">458</a>
+<a class="ln" id="L459" href="#L459">459</a><span class="com">// How many times one write may run a watcher. A watcher that writes a signal it reads makes</span>
+<a class="ln" id="L460" href="#L460">460</a><span class="com">// itself stale again; past this it is not queued, and `take_stalled` names it.</span>
+<a class="ln" id="L461" href="#L461">461</a><span class="kw">fn</span> <span class="fn">run_limit</span>(): u64 { <span class="num">100</span> }
+<a class="ln" id="L462" href="#L462">462</a>
+<a class="ln" id="L463" href="#L463">463</a><span class="kw">fn</span> <span class="fn">runs_of</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64): u64 ! {wait, mutex_claim} {
+<a class="ln" id="L464" href="#L464">464</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.runs, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;w) {
+<a class="ln" id="L465" href="#L465">465</a>    <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L466" href="#L466">466</a>    <span class="ty">Some</span>(n) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;n)
+<a class="ln" id="L467" href="#L467">467</a>  })
+<a class="ln" id="L468" href="#L468">468</a>}
+<a class="ln" id="L469" href="#L469">469</a>
+<a class="ln" id="L470" href="#L470">470</a><span class="kw">fn</span> <span class="fn">count_run</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L471" href="#L471">471</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.runs, (m) =&gt; {
+<a class="ln" id="L472" href="#L472">472</a>    <span class="kw">let</span> n := <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;w) {
+<a class="ln" id="L473" href="#L473">473</a>      <span class="ty">None</span> =&gt; <span class="num">0</span>
+<a class="ln" id="L474" href="#L474">474</a>      <span class="ty">Some</span>(x) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;x)
+<a class="ln" id="L475" href="#L475">475</a>    }
+<a class="ln" id="L476" href="#L476">476</a>    <span class="com">// The count of runs stays at its greatest when it cannot grow.</span>
+<a class="ln" id="L477" href="#L477">477</a>    <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, w, <span class="kw">handle</span> { n + <span class="num">1</span> } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; n })
+<a class="ln" id="L478" href="#L478">478</a>    #()
+<a class="ln" id="L479" href="#L479">479</a>  })
+<a class="ln" id="L480" href="#L480">480</a>}
+<a class="ln" id="L481" href="#L481">481</a>
+<a class="ln" id="L482" href="#L482">482</a><span class="kw">fn</span> <span class="fn">queue</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">ws</span>: <span class="ty">List</span>(u64)): <span class="ty">Unit</span> ! {wait, ref_get, ref_set, mutex_claim} {
+<a class="ln" id="L483" href="#L483">483</a>  <span class="kw">match</span> ws {
+<a class="ln" id="L484" href="#L484">484</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L485" href="#L485">485</a>    <span class="ty">Cons</span>(w, t) =&gt; {
+<a class="ln" id="L486" href="#L486">486</a>      <span class="kw">if</span> <a href="#L180"><span class="fn">is_queued</span></a>(r, w) { #() } <span class="kw">else</span> <span class="kw">if</span> <a href="#L463"><span class="fn">runs_of</span></a>(r, w) &gt;= <a href="#L461"><span class="fn">run_limit</span></a>() {
+<a class="ln" id="L487" href="#L487">487</a>        <span class="kw">let</span> ss := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.stalled)
+<a class="ln" id="L488" href="#L488">488</a>        <span class="kw">if</span> <a href="#L138"><span class="fn">has_id</span></a>(ss, w) { #() } <span class="kw">else</span> { <span class="kw">perform</span> <span class="fn">ref_set</span>(r.stalled, <span class="ty">Cons</span>(w, ss)) }
+<a class="ln" id="L489" href="#L489">489</a>      } <span class="kw">else</span> {
+<a class="ln" id="L490" href="#L490">490</a>        <a href="#L187"><span class="fn">set_queued</span></a>(r, w, <span class="kw">true</span>)
+<a class="ln" id="L491" href="#L491">491</a>        <span class="kw">perform</span> <span class="fn">ref_set</span>(r.pending, <span class="ty">Cons</span>(w, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.pending)))
+<a class="ln" id="L492" href="#L492">492</a>      }
+<a class="ln" id="L493" href="#L493">493</a>      <a href="#L482"><span class="fn">queue</span></a>(r, t)
+<a class="ln" id="L494" href="#L494">494</a>    }
+<a class="ln" id="L495" href="#L495">495</a>  }
+<a class="ln" id="L496" href="#L496">496</a>}
+<a class="ln" id="L497" href="#L497">497</a>
+<a class="ln" id="L498" href="#L498">498</a><span class="com">// Writes the signal and runs again, once each, the watchers that read it.</span>
+<a class="ln" id="L499" href="#L499">499</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">set</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(<span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>), <span class="var">v</span>: <span class="ty">T</span>): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L500" href="#L500">500</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L501" href="#L501">501</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(s.cell, v)
+<a class="ln" id="L502" href="#L502">502</a>  <a href="#L482"><span class="fn">queue</span></a>(r, <a href="#L260"><span class="fn">live_readers</span></a>(r, s.id))
+<a class="ln" id="L503" href="#L503">503</a>  <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(r.flushing) { #() } <span class="kw">else</span> {
+<a class="ln" id="L504" href="#L504">504</a>    <span class="kw">perform</span> <span class="fn">ref_set</span>(r.flushing, <span class="kw">true</span>)
+<a class="ln" id="L505" href="#L505">505</a>    <a href="#L590"><span class="fn">flush</span></a>(r)
+<a class="ln" id="L506" href="#L506">506</a>    <a href="#L518"><span class="fn">end_flush</span></a>(r)
+<a class="ln" id="L507" href="#L507">507</a>  }
+<a class="ln" id="L508" href="#L508">508</a>}
+<a class="ln" id="L509" href="#L509">509</a>
+<a class="ln" id="L510" href="#L510">510</a><span class="com">// Writes only when the value changes, without subscribing the current watcher.</span>
+<a class="ln" id="L511" href="#L511">511</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">set_eq</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L512" href="#L512">512</a>  <span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>),
+<a class="ln" id="L513" href="#L513">513</a>  <span class="var">v</span>: <span class="ty">T</span>
+<a class="ln" id="L514" href="#L514">514</a>): <span class="ty">Unit</span> ! {rt, div} <span class="kw">where</span> <span class="ty">DecEq</span>(<span class="ty">T</span>) {
+<a class="ln" id="L515" href="#L515">515</a>  <span class="kw">if</span> <a href="#L438"><span class="fn">peek</span></a>(s) == v { #() } <span class="kw">else</span> { <a href="#L499"><span class="fn">set</span></a>(s, v) }
+<a class="ln" id="L516" href="#L516">516</a>}
+<a class="ln" id="L517" href="#L517">517</a>
+<a class="ln" id="L518" href="#L518">518</a><span class="kw">fn</span> <span class="fn">end_flush</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>): <span class="ty">Unit</span> ! {wait, ref_set, mutex_claim} {
+<a class="ln" id="L519" href="#L519">519</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.runs, (m) =&gt; {
+<a class="ln" id="L520" href="#L520">520</a>    *m := <span class="fn">HashMap::with_seed</span>(<span class="fn">HashMap::seed</span>(&amp;m))
+<a class="ln" id="L521" href="#L521">521</a>    #()
+<a class="ln" id="L522" href="#L522">522</a>  })
+<a class="ln" id="L523" href="#L523">523</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.flushing, <span class="kw">false</span>)
+<a class="ln" id="L524" href="#L524">524</a>}
+<a class="ln" id="L525" href="#L525">525</a>
+<a class="ln" id="L526" href="#L526">526</a><span class="com">// The watchers that writes stopped running again since the last call, because one write</span>
+<a class="ln" id="L527" href="#L527">527</a><span class="com">// had run them too many times, as when a watcher writes a signal it reads; newest first.</span>
+<a class="ln" id="L528" href="#L528">528</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">take_stalled</span>(): <span class="ty">List</span>(u64) ! {rt} {
+<a class="ln" id="L529" href="#L529">529</a>  <span class="kw">let</span> r := <a href="#L391"><span class="fn">current</span></a>()
+<a class="ln" id="L530" href="#L530">530</a>  <span class="kw">let</span> ws := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.stalled)
+<a class="ln" id="L531" href="#L531">531</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.stalled, <span class="ty">Nil</span>)
+<a class="ln" id="L532" href="#L532">532</a>  ws
+<a class="ln" id="L533" href="#L533">533</a>}
+<a class="ln" id="L534" href="#L534">534</a>
+<a class="ln" id="L535" href="#L535">535</a><span class="com">// Puts the runtime back to rest after the host abandoned a call into it halfway, as when a</span>
+<a class="ln" id="L536" href="#L536">536</a><span class="com">// host function threw inside a watcher: the write in progress ends, the watchers it still</span>
+<a class="ln" id="L537" href="#L537">537</a><span class="com">// had queued are dropped and named by `take_stalled`, and no watcher counts as running.</span>
+<a class="ln" id="L538" href="#L538">538</a><span class="com">// Without this, a write left `flushing` and every later write would run no watcher. The host</span>
+<a class="ln" id="L539" href="#L539">539</a><span class="com">// calls it with why it gave up, which `take_failures` gives back.</span>
+<a class="ln" id="L540" href="#L540">540</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">recover</span>(<span class="var">why</span>: <span class="ty">Text</span>): <span class="ty">Unit</span> ! {rt} {
+<a class="ln" id="L541" href="#L541">541</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L542" href="#L542">542</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.failures, <span class="ty">Cons</span>(why, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.failures)))
+<a class="ln" id="L543" href="#L543">543</a>  <a href="#L550"><span class="fn">drop_pending</span></a>(r, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.pending))
+<a class="ln" id="L544" href="#L544">544</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.pending, <span class="ty">Nil</span>)
+<a class="ln" id="L545" href="#L545">545</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, <span class="ty">None</span>)
+<a class="ln" id="L546" href="#L546">546</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, <a href="#L352"><span class="fn">root_owner</span></a>())
+<a class="ln" id="L547" href="#L547">547</a>  <a href="#L518"><span class="fn">end_flush</span></a>(r)
+<a class="ln" id="L548" href="#L548">548</a>}
+<a class="ln" id="L549" href="#L549">549</a>
+<a class="ln" id="L550" href="#L550">550</a><span class="kw">fn</span> <span class="fn">drop_pending</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">ws</span>: <span class="ty">List</span>(u64)): <span class="ty">Unit</span> ! {wait, ref_get, ref_set, mutex_claim} {
+<a class="ln" id="L551" href="#L551">551</a>  <span class="kw">match</span> ws {
+<a class="ln" id="L552" href="#L552">552</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L553" href="#L553">553</a>    <span class="ty">Cons</span>(w, t) =&gt; {
+<a class="ln" id="L554" href="#L554">554</a>      <a href="#L187"><span class="fn">set_queued</span></a>(r, w, <span class="kw">false</span>)
+<a class="ln" id="L555" href="#L555">555</a>      <span class="kw">let</span> ss := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.stalled)
+<a class="ln" id="L556" href="#L556">556</a>      <span class="kw">if</span> <a href="#L138"><span class="fn">has_id</span></a>(ss, w) { #() } <span class="kw">else</span> { <span class="kw">perform</span> <span class="fn">ref_set</span>(r.stalled, <span class="ty">Cons</span>(w, ss)) }
+<a class="ln" id="L557" href="#L557">557</a>      <a href="#L550"><span class="fn">drop_pending</span></a>(r, t)
+<a class="ln" id="L558" href="#L558">558</a>    }
+<a class="ln" id="L559" href="#L559">559</a>  }
+<a class="ln" id="L560" href="#L560">560</a>}
+<a class="ln" id="L561" href="#L561">561</a>
+<a class="ln" id="L562" href="#L562">562</a><span class="com">// Why the host gave up on calls into the runtime since the last call, newest first.</span>
+<a class="ln" id="L563" href="#L563">563</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">take_failures</span>(): <span class="ty">List</span>(<span class="ty">Text</span>) ! {rt} {
+<a class="ln" id="L564" href="#L564">564</a>  <span class="kw">let</span> r := <a href="#L391"><span class="fn">current</span></a>()
+<a class="ln" id="L565" href="#L565">565</a>  <span class="kw">let</span> fs := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.failures)
+<a class="ln" id="L566" href="#L566">566</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.failures, <span class="ty">Nil</span>)
+<a class="ln" id="L567" href="#L567">567</a>  fs
+<a class="ln" id="L568" href="#L568">568</a>}
+<a class="ln" id="L569" href="#L569">569</a>
+<a class="ln" id="L570" href="#L570">570</a><span class="com">// Runs `f` with its writes held back: the watchers they make stale run once each, after `f`.</span>
+<a class="ln" id="L571" href="#L571">571</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">batch</span>&lt;<span class="ty">T</span>&gt;(<span class="var">f</span>: () -&gt; <span class="ty">T</span> ! {rt, div}): <span class="ty">T</span> ! {rt, div} {
+<a class="ln" id="L572" href="#L572">572</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L573" href="#L573">573</a>  <span class="kw">if</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(r.flushing) { <span class="fn">f</span>() } <span class="kw">else</span> {
+<a class="ln" id="L574" href="#L574">574</a>    <span class="kw">perform</span> <span class="fn">ref_set</span>(r.flushing, <span class="kw">true</span>)
+<a class="ln" id="L575" href="#L575">575</a>    <span class="kw">let</span> v := <span class="fn">f</span>()
+<a class="ln" id="L576" href="#L576">576</a>    <a href="#L590"><span class="fn">flush</span></a>(r)
+<a class="ln" id="L577" href="#L577">577</a>    <a href="#L518"><span class="fn">end_flush</span></a>(r)
+<a class="ln" id="L578" href="#L578">578</a>    v
+<a class="ln" id="L579" href="#L579">579</a>  }
+<a class="ln" id="L580" href="#L580">580</a>}
+<a class="ln" id="L581" href="#L581">581</a>
+<a class="ln" id="L582" href="#L582">582</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">update</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L583" href="#L583">583</a>  <span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>),
+<a class="ln" id="L584" href="#L584">584</a>  <span class="var">f</span>: (<span class="ty">T</span>) -&gt; <span class="ty">T</span> ! {div}
+<a class="ln" id="L585" href="#L585">585</a>): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L586" href="#L586">586</a>  <a href="#L499"><span class="fn">set</span></a>(s, <span class="fn">f</span>(<a href="#L438"><span class="fn">peek</span></a>(s)))
+<a class="ln" id="L587" href="#L587">587</a>}
+<a class="ln" id="L588" href="#L588">588</a>
+<a class="ln" id="L589" href="#L589">589</a><span class="com">// Runs the queued watchers, oldest first, until a run queues no more.</span>
+<a class="ln" id="L590" href="#L590">590</a><span class="kw">fn</span> <span class="fn">flush</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L591" href="#L591">591</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">ref_get</span>(r.pending) {
+<a class="ln" id="L592" href="#L592">592</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L593" href="#L593">593</a>    <span class="ty">Cons</span>(w, t) =&gt; {
+<a class="ln" id="L594" href="#L594">594</a>      <span class="kw">let</span> batch := <a href="#L152"><span class="fn">reverse_ids</span></a>(<span class="kw">perform</span> <span class="fn">ref_get</span>(r.pending), <span class="ty">Nil</span>)
+<a class="ln" id="L595" href="#L595">595</a>      <span class="kw">perform</span> <span class="fn">ref_set</span>(r.pending, <span class="ty">Nil</span>)
+<a class="ln" id="L596" href="#L596">596</a>      <a href="#L602"><span class="fn">run_batch</span></a>(r, batch)
+<a class="ln" id="L597" href="#L597">597</a>      <a href="#L590"><span class="fn">flush</span></a>(r)
+<a class="ln" id="L598" href="#L598">598</a>    }
+<a class="ln" id="L599" href="#L599">599</a>  }
+<a class="ln" id="L600" href="#L600">600</a>}
+<a class="ln" id="L601" href="#L601">601</a>
+<a class="ln" id="L602" href="#L602">602</a><span class="kw">fn</span> <span class="fn">run_batch</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">ws</span>: <span class="ty">List</span>(u64)): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L603" href="#L603">603</a>  <span class="kw">var</span> l := ws
+<a class="ln" id="L604" href="#L604">604</a>  <span class="kw">var</span> more := <span class="kw">true</span>
+<a class="ln" id="L605" href="#L605">605</a>  <span class="kw">while</span> more {
+<a class="ln" id="L606" href="#L606">606</a>    <span class="kw">match</span> l {
+<a class="ln" id="L607" href="#L607">607</a>      <span class="ty">Nil</span> =&gt; { more := <span class="kw">false</span> }
+<a class="ln" id="L608" href="#L608">608</a>      <span class="ty">Cons</span>(w, t) =&gt; {
+<a class="ln" id="L609" href="#L609">609</a>        <a href="#L187"><span class="fn">set_queued</span></a>(r, w, <span class="kw">false</span>)
+<a class="ln" id="L610" href="#L610">610</a>        <a href="#L470"><span class="fn">count_run</span></a>(r, w)
+<a class="ln" id="L611" href="#L611">611</a>        <a href="#L619"><span class="fn">run_watcher</span></a>(r, w)
+<a class="ln" id="L612" href="#L612">612</a>        l := t
+<a class="ln" id="L613" href="#L613">613</a>      }
+<a class="ln" id="L614" href="#L614">614</a>    }
+<a class="ln" id="L615" href="#L615">615</a>  }
+<a class="ln" id="L616" href="#L616">616</a>}
+<a class="ln" id="L617" href="#L617">617</a>
+<a class="ln" id="L618" href="#L618">618</a><span class="com">// Disposes what the last run of `w` created, forgets what it read, and runs it again.</span>
+<a class="ln" id="L619" href="#L619">619</a><span class="kw">fn</span> <span class="fn">run_watcher</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">w</span>: u64): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L620" href="#L620">620</a>  <span class="kw">match</span> <a href="#L284"><span class="fn">find_watcher</span></a>(r, w) {
+<a class="ln" id="L621" href="#L621">621</a>    <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L622" href="#L622">622</a>    <span class="ty">Some</span>(x) =&gt; {
+<a class="ln" id="L623" href="#L623">623</a>      <a href="#L771"><span class="fn">dispose_children</span></a>(r, w)
+<a class="ln" id="L624" href="#L624">624</a>      <a href="#L787"><span class="fn">run_cleanups</span></a>(r, w)
+<a class="ln" id="L625" href="#L625">625</a>      <a href="#L194"><span class="fn">unsubscribe</span></a>(r, w)
+<a class="ln" id="L626" href="#L626">626</a>      <span class="kw">let</span> saved_observer := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.observer)
+<a class="ln" id="L627" href="#L627">627</a>      <span class="kw">let</span> saved_owner := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.owner)
+<a class="ln" id="L628" href="#L628">628</a>      <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, <span class="ty">Some</span>(w))
+<a class="ln" id="L629" href="#L629">629</a>      <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, w)
+<a class="ln" id="L630" href="#L630">630</a>      (x.run)()
+<a class="ln" id="L631" href="#L631">631</a>      <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, saved_observer)
+<a class="ln" id="L632" href="#L632">632</a>      <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, saved_owner)
+<a class="ln" id="L633" href="#L633">633</a>    }
+<a class="ln" id="L634" href="#L634">634</a>  }
+<a class="ln" id="L635" href="#L635">635</a>}
+<a class="ln" id="L636" href="#L636">636</a>
+<a class="ln" id="L637" href="#L637">637</a><span class="com">// Runs `f` now, and again whenever a signal it read changes. The watcher belongs to the</span>
+<a class="ln" id="L638" href="#L638">638</a><span class="com">// current owner and ends with it.</span>
+<a class="ln" id="L639" href="#L639">639</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">watch</span>(<span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt, div, overflow} {
+<a class="ln" id="L640" href="#L640">640</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L641" href="#L641">641</a>  <span class="kw">let</span> w := <a href="#L345"><span class="fn">fresh</span></a>(r)
+<a class="ln" id="L642" href="#L642">642</a>  <a href="#L753"><span class="fn">adopt</span></a>(r, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.owner), w)
+<a class="ln" id="L643" href="#L643">643</a>  <a href="#L292"><span class="fn">set_watcher</span></a>(r, w, <span class="ty">Some</span>(<span class="ty">Watcher</span> { id: w, run: () =&gt; <span class="fn">f</span>() }))
+<a class="ln" id="L644" href="#L644">644</a>  <a href="#L619"><span class="fn">run_watcher</span></a>(r, w)
+<a class="ln" id="L645" href="#L645">645</a>}
+<a class="ln" id="L646" href="#L646">646</a>
+<a class="ln" id="L647" href="#L647">647</a><span class="com">// A signal that holds `f()` and follows the signals `f` reads. Its readers run on every</span>
+<a class="ln" id="L648" href="#L648">648</a><span class="com">// change of a source, even when `f()` gives the same value again; `memo_eq` skips those.</span>
+<a class="ln" id="L649" href="#L649">649</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">memo</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L650" href="#L650">650</a>  <span class="var">f</span>: () -&gt; <span class="ty">T</span> ! {rt, div}
+<a class="ln" id="L651" href="#L651">651</a>): <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>) ! {rt, div} {
+<a class="ln" id="L652" href="#L652">652</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L653" href="#L653">653</a>  <span class="kw">let</span> m := <span class="ty">delim::src::signal::Signal</span> { id: <a href="#L345"><span class="fn">fresh</span></a>(r), cell: <span class="kw">perform</span> <span class="fn">ref_new</span>(<a href="#L673"><span class="fn">untracked</span></a>(f)) }
+<a class="ln" id="L654" href="#L654">654</a>  <span class="com">// The first run only subscribes: nothing has read `m` yet, so the write reaches no one.</span>
+<a class="ln" id="L655" href="#L655">655</a>  <a href="#L639"><span class="fn">watch</span></a>(() =&gt; <a href="#L499"><span class="fn">set</span></a>(m, <span class="fn">f</span>()))
+<a class="ln" id="L656" href="#L656">656</a>  m
+<a class="ln" id="L657" href="#L657">657</a>}
+<a class="ln" id="L658" href="#L658">658</a>
+<a class="ln" id="L659" href="#L659">659</a><span class="com">// A memo whose readers run only when `f()` gives a value different from the one it holds.</span>
+<a class="ln" id="L660" href="#L660">660</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">memo_eq</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L661" href="#L661">661</a>  <span class="var">f</span>: () -&gt; <span class="ty">T</span> ! {rt, div}
+<a class="ln" id="L662" href="#L662">662</a>): <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>) ! {rt, div} <span class="kw">where</span> <span class="ty">DecEq</span>(<span class="ty">T</span>) {
+<a class="ln" id="L663" href="#L663">663</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L664" href="#L664">664</a>  <span class="kw">let</span> m := <span class="ty">delim::src::signal::Signal</span> { id: <a href="#L345"><span class="fn">fresh</span></a>(r), cell: <span class="kw">perform</span> <span class="fn">ref_new</span>(<a href="#L673"><span class="fn">untracked</span></a>(f)) }
+<a class="ln" id="L665" href="#L665">665</a>  <a href="#L639"><span class="fn">watch</span></a>(() =&gt; {
+<a class="ln" id="L666" href="#L666">666</a>    <span class="kw">let</span> v := <span class="fn">f</span>()
+<a class="ln" id="L667" href="#L667">667</a>    <span class="kw">if</span> v == <a href="#L438"><span class="fn">peek</span></a>(m) { #() } <span class="kw">else</span> { <a href="#L499"><span class="fn">set</span></a>(m, v) }
+<a class="ln" id="L668" href="#L668">668</a>  })
+<a class="ln" id="L669" href="#L669">669</a>  m
+<a class="ln" id="L670" href="#L670">670</a>}
+<a class="ln" id="L671" href="#L671">671</a>
+<a class="ln" id="L672" href="#L672">672</a><span class="com">// Runs `f` without subscribing the current watcher to what it reads.</span>
+<a class="ln" id="L673" href="#L673">673</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">untracked</span>&lt;<span class="ty">T</span>&gt;(<span class="var">f</span>: () -&gt; <span class="ty">T</span> ! {rt, div}): <span class="ty">T</span> ! {rt, div, overflow} {
+<a class="ln" id="L674" href="#L674">674</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L675" href="#L675">675</a>  <span class="kw">let</span> saved := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.observer)
+<a class="ln" id="L676" href="#L676">676</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, <span class="ty">None</span>)
+<a class="ln" id="L677" href="#L677">677</a>  <span class="kw">let</span> v := <span class="fn">f</span>()
+<a class="ln" id="L678" href="#L678">678</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, saved)
+<a class="ln" id="L679" href="#L679">679</a>  v
+<a class="ln" id="L680" href="#L680">680</a>}
+<a class="ln" id="L681" href="#L681">681</a>
+<a class="ln" id="L682" href="#L682">682</a><span class="com">// Runs `f` when the current owner ends: before its watcher runs again, or when it is disposed.</span>
+<a class="ln" id="L683" href="#L683">683</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">on_cleanup</span>(<span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt} {
+<a class="ln" id="L684" href="#L684">684</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L685" href="#L685">685</a>  <span class="kw">let</span> o := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.owner)
+<a class="ln" id="L686" href="#L686">686</a>  <a href="#L308"><span class="fn">set_cleanups</span></a>(r, o, <span class="ty">Cons</span>(<span class="ty">Cleanup</span> { owner: o, run: () =&gt; <span class="fn">f</span>() }, <a href="#L301"><span class="fn">cleanups_at</span></a>(r, o)))
+<a class="ln" id="L687" href="#L687">687</a>}
+<a class="ln" id="L688" href="#L688">688</a>
+<a class="ln" id="L689" href="#L689">689</a><span class="com">// ---- timers ------------------------------------------------------------------------------</span>
+<a class="ln" id="L690" href="#L690">690</a>
+<a class="ln" id="L691" href="#L691">691</a><span class="kw">fn</span> <span class="fn">add_timer</span>(<span class="var">ms</span>: u64, <span class="var">every</span>: <span class="ty">Bool</span>, <span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt} {
+<a class="ln" id="L692" href="#L692">692</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L693" href="#L693">693</a>  <span class="kw">let</span> live := <span class="kw">perform</span> <span class="fn">ref_new</span>(<span class="kw">true</span>)
+<a class="ln" id="L694" href="#L694">694</a>  <a href="#L683"><span class="fn">on_cleanup</span></a>(() =&gt; <span class="kw">perform</span> <span class="fn">ref_set</span>(live, <span class="kw">false</span>))
+<a class="ln" id="L695" href="#L695">695</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(
+<a class="ln" id="L696" href="#L696">696</a>    r.timers,
+<a class="ln" id="L697" href="#L697">697</a>    <span class="ty">Cons</span>(<span class="ty">Timer</span> { ms: ms, every: every, live: live, run: f }, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.timers))
+<a class="ln" id="L698" href="#L698">698</a>  )
+<a class="ln" id="L699" href="#L699">699</a>}
+<a class="ln" id="L700" href="#L700">700</a>
+<a class="ln" id="L701" href="#L701">701</a><span class="com">// Runs `f` once, `ms` milliseconds from now, unless the current owner ends first. The renderer</span>
+<a class="ln" id="L702" href="#L702">702</a><span class="com">// starts the timer (`take_timers`); one that never starts one, such as the HTML writer, never runs it.</span>
+<a class="ln" id="L703" href="#L703">703</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">after</span>(<span class="var">ms</span>: u64, <span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt} { <a href="#L691"><span class="fn">add_timer</span></a>(ms, <span class="kw">false</span>, f) }
+<a class="ln" id="L704" href="#L704">704</a>
+<a class="ln" id="L705" href="#L705">705</a><span class="com">// Runs `f` every `ms` milliseconds until the current owner ends.</span>
+<a class="ln" id="L706" href="#L706">706</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">every</span>(<span class="var">ms</span>: u64, <span class="var">f</span>: () -&gt; <span class="ty">Unit</span> ! {rt, div}): <span class="ty">Unit</span> ! {rt} { <a href="#L691"><span class="fn">add_timer</span></a>(ms, <span class="kw">true</span>, f) }
+<a class="ln" id="L707" href="#L707">707</a>
+<a class="ln" id="L708" href="#L708">708</a><span class="kw">fn</span> <span class="fn">reverse_timers</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L32"><span class="ty">Timer</span></a>), <span class="var">acc</span>: <span class="ty">List</span>(<a href="#L32"><span class="ty">Timer</span></a>)): <span class="ty">List</span>(<a href="#L32"><span class="ty">Timer</span></a>) {
+<a class="ln" id="L709" href="#L709">709</a>  <span class="kw">match</span> l {
+<a class="ln" id="L710" href="#L710">710</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L711" href="#L711">711</a>    <span class="ty">Cons</span>(x, rest) =&gt; <a href="#L708"><span class="fn">reverse_timers</span></a>(rest, <span class="ty">Cons</span>(x, acc))
+<a class="ln" id="L712" href="#L712">712</a>  }
+<a class="ln" id="L713" href="#L713">713</a>}
+<a class="ln" id="L714" href="#L714">714</a>
+<a class="ln" id="L715" href="#L715">715</a><span class="com">// The timers asked for since the last call, oldest first, for the renderer to start.</span>
+<a class="ln" id="L716" href="#L716">716</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">take_timers</span>(): <span class="ty">List</span>(<a href="#L32"><span class="ty">Timer</span></a>) ! {rt} {
+<a class="ln" id="L717" href="#L717">717</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L718" href="#L718">718</a>  <span class="kw">let</span> ts := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.timers)
+<a class="ln" id="L719" href="#L719">719</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.timers, <span class="ty">Nil</span>)
+<a class="ln" id="L720" href="#L720">720</a>  <a href="#L708"><span class="fn">reverse_timers</span></a>(ts, <span class="ty">Nil</span>)
+<a class="ln" id="L721" href="#L721">721</a>}
+<a class="ln" id="L722" href="#L722">722</a>
+<a class="ln" id="L723" href="#L723">723</a><span class="com">// The value created in a scope and its owner, for `dispose`.</span>
+<a class="ln" id="L724" href="#L724">724</a><span class="kw">pub(open)</span> <span class="kw">struct</span> <span class="ty">Scoped</span>(<span class="ty">T</span>: <span class="ty">Type</span>) { value: <span class="ty">T</span>, owner: u64 }
+<a class="ln" id="L725" href="#L725">725</a>
+<a class="ln" id="L726" href="#L726">726</a><span class="com">// Runs `f` as a new owner and gives back its result and the owner, for `dispose`.</span>
+<a class="ln" id="L727" href="#L727">727</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">scope</span>&lt;<span class="ty">T</span>&gt;(<span class="var">f</span>: () -&gt; <span class="ty">T</span> ! {rt, div}): <a href="#L724"><span class="ty">Scoped</span></a>(<span class="ty">T</span>) ! {rt, div} {
+<a class="ln" id="L728" href="#L728">728</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L729" href="#L729">729</a>  <span class="kw">let</span> o := <a href="#L345"><span class="fn">fresh</span></a>(r)
+<a class="ln" id="L730" href="#L730">730</a>  <a href="#L753"><span class="fn">adopt</span></a>(r, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.owner), o)
+<a class="ln" id="L731" href="#L731">731</a>  <span class="kw">let</span> saved := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.owner)
+<a class="ln" id="L732" href="#L732">732</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, o)
+<a class="ln" id="L733" href="#L733">733</a>  <span class="kw">let</span> v := <span class="fn">f</span>()
+<a class="ln" id="L734" href="#L734">734</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, saved)
+<a class="ln" id="L735" href="#L735">735</a>  <span class="ty">Scoped</span> { value: v, owner: o }
+<a class="ln" id="L736" href="#L736">736</a>}
+<a class="ln" id="L737" href="#L737">737</a>
+<a class="ln" id="L738" href="#L738">738</a><span class="com">// Ends the owner `o`: what it created ends first, then its cleanups run, newest first.</span>
+<a class="ln" id="L739" href="#L739">739</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">dispose</span>(<span class="var">o</span>: u64): <span class="ty">Unit</span> ! {rt, div, overflow} {
+<a class="ln" id="L740" href="#L740">740</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L741" href="#L741">741</a>  <a href="#L744"><span class="fn">dispose_owner</span></a>(r, o)
+<a class="ln" id="L742" href="#L742">742</a>}
+<a class="ln" id="L743" href="#L743">743</a>
+<a class="ln" id="L744" href="#L744">744</a><span class="kw">fn</span> <span class="fn">dispose_owner</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">o</span>: u64): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L745" href="#L745">745</a>  <a href="#L771"><span class="fn">dispose_children</span></a>(r, o)
+<a class="ln" id="L746" href="#L746">746</a>  <a href="#L787"><span class="fn">run_cleanups</span></a>(r, o)
+<a class="ln" id="L747" href="#L747">747</a>  <a href="#L194"><span class="fn">unsubscribe</span></a>(r, o)
+<a class="ln" id="L748" href="#L748">748</a>  <a href="#L292"><span class="fn">set_watcher</span></a>(r, o, <span class="ty">None</span>)
+<a class="ln" id="L749" href="#L749">749</a>  <a href="#L760"><span class="fn">disown</span></a>(r, o)
+<a class="ln" id="L750" href="#L750">750</a>}
+<a class="ln" id="L751" href="#L751">751</a>
+<a class="ln" id="L752" href="#L752">752</a><span class="com">// `c` was created under `o`.</span>
+<a class="ln" id="L753" href="#L753">753</a><span class="kw">fn</span> <span class="fn">adopt</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">o</span>: u64, <span class="var">c</span>: u64): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L754" href="#L754">754</a>  <a href="#L176"><span class="fn">push_id</span></a>(r.children, o, c)
+<a class="ln" id="L755" href="#L755">755</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.parents, (m) =&gt; { <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, c, o); #() })
+<a class="ln" id="L756" href="#L756">756</a>}
+<a class="ln" id="L757" href="#L757">757</a>
+<a class="ln" id="L758" href="#L758">758</a><span class="com">// Takes `c` out of the children of the owner it was created under. When that owner is ending</span>
+<a class="ln" id="L759" href="#L759">759</a><span class="com">// too, its list is already empty.</span>
+<a class="ln" id="L760" href="#L760">760</a><span class="kw">fn</span> <span class="fn">disown</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">c</span>: u64): <span class="ty">Unit</span> ! {wait, mutex_claim} {
+<a class="ln" id="L761" href="#L761">761</a>  <span class="kw">let</span> p := <a href="#L131"><span class="fn">alone_with</span></a>(r.parents, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::remove</span>(&amp;<span class="kw">mut</span> m, &amp;c) {
+<a class="ln" id="L762" href="#L762">762</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L763" href="#L763">763</a>    <span class="ty">Some</span>(kv) =&gt; <span class="kw">match</span> kv { #(k, v) =&gt; <span class="ty">Some</span>(v) }
+<a class="ln" id="L764" href="#L764">764</a>  })
+<a class="ln" id="L765" href="#L765">765</a>  <span class="kw">match</span> p {
+<a class="ln" id="L766" href="#L766">766</a>    <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L767" href="#L767">767</a>    <span class="ty">Some</span>(o) =&gt; <a href="#L167"><span class="fn">set_ids</span></a>(r.children, o, <a href="#L145"><span class="fn">without_id</span></a>(<a href="#L159"><span class="fn">ids_at</span></a>(r.children, o), c))
+<a class="ln" id="L768" href="#L768">768</a>  }
+<a class="ln" id="L769" href="#L769">769</a>}
+<a class="ln" id="L770" href="#L770">770</a>
+<a class="ln" id="L771" href="#L771">771</a><span class="kw">fn</span> <span class="fn">dispose_children</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">o</span>: u64): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L772" href="#L772">772</a>  <span class="kw">let</span> cs := <a href="#L159"><span class="fn">ids_at</span></a>(r.children, o)
+<a class="ln" id="L773" href="#L773">773</a>  <a href="#L167"><span class="fn">set_ids</span></a>(r.children, o, <span class="ty">Nil</span>)
+<a class="ln" id="L774" href="#L774">774</a>  <a href="#L777"><span class="fn">dispose_all</span></a>(r, cs)
+<a class="ln" id="L775" href="#L775">775</a>}
+<a class="ln" id="L776" href="#L776">776</a>
+<a class="ln" id="L777" href="#L777">777</a><span class="kw">fn</span> <span class="fn">dispose_all</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">l</span>: <span class="ty">List</span>(u64)): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L778" href="#L778">778</a>  <span class="kw">match</span> l {
+<a class="ln" id="L779" href="#L779">779</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L780" href="#L780">780</a>    <span class="ty">Cons</span>(c, t) =&gt; {
+<a class="ln" id="L781" href="#L781">781</a>      <a href="#L744"><span class="fn">dispose_owner</span></a>(r, c)
+<a class="ln" id="L782" href="#L782">782</a>      <a href="#L777"><span class="fn">dispose_all</span></a>(r, t)
+<a class="ln" id="L783" href="#L783">783</a>    }
+<a class="ln" id="L784" href="#L784">784</a>  }
+<a class="ln" id="L785" href="#L785">785</a>}
+<a class="ln" id="L786" href="#L786">786</a>
+<a class="ln" id="L787" href="#L787">787</a><span class="kw">fn</span> <span class="fn">run_cleanups</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">o</span>: u64): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L788" href="#L788">788</a>  <span class="kw">let</span> l := <a href="#L301"><span class="fn">cleanups_at</span></a>(r, o)
+<a class="ln" id="L789" href="#L789">789</a>  <a href="#L308"><span class="fn">set_cleanups</span></a>(r, o, <span class="ty">Nil</span>)
+<a class="ln" id="L790" href="#L790">790</a>  <a href="#L793"><span class="fn">run_each</span></a>(l)
+<a class="ln" id="L791" href="#L791">791</a>}
+<a class="ln" id="L792" href="#L792">792</a>
+<a class="ln" id="L793" href="#L793">793</a><span class="kw">fn</span> <span class="fn">run_each</span>(<span class="var">l</span>: <span class="ty">List</span>(<a href="#L28"><span class="ty">Cleanup</span></a>)): <span class="ty">Unit</span> ! {rt, div} {
+<a class="ln" id="L794" href="#L794">794</a>  <span class="kw">match</span> l {
+<a class="ln" id="L795" href="#L795">795</a>    <span class="ty">Nil</span> =&gt; #()
+<a class="ln" id="L796" href="#L796">796</a>    <span class="ty">Cons</span>(c, t) =&gt; {
+<a class="ln" id="L797" href="#L797">797</a>      (c.run)()
+<a class="ln" id="L798" href="#L798">798</a>      <a href="#L793"><span class="fn">run_each</span></a>(t)
+<a class="ln" id="L799" href="#L799">799</a>    }
+<a class="ln" id="L800" href="#L800">800</a>  }
+<a class="ln" id="L801" href="#L801">801</a>}
+<a class="ln" id="L802" href="#L802">802</a>
+<a class="ln" id="L803" href="#L803">803</a><span class="com">// Runs `f` under the owner `o`, outside any watcher: what it creates belongs to `o`.</span>
+<a class="ln" id="L804" href="#L804">804</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">in_owner</span>&lt;<span class="ty">T</span>&gt;(<span class="var">o</span>: u64, <span class="var">f</span>: () -&gt; <span class="ty">T</span> ! {rt, div}): <span class="ty">T</span> ! {rt, div} {
+<a class="ln" id="L805" href="#L805">805</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L806" href="#L806">806</a>  <span class="kw">let</span> saved_observer := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.observer)
+<a class="ln" id="L807" href="#L807">807</a>  <span class="kw">let</span> saved_owner := <span class="kw">perform</span> <span class="fn">ref_get</span>(r.owner)
+<a class="ln" id="L808" href="#L808">808</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, <span class="ty">None</span>)
+<a class="ln" id="L809" href="#L809">809</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, o)
+<a class="ln" id="L810" href="#L810">810</a>  <span class="kw">let</span> v := <span class="fn">f</span>()
+<a class="ln" id="L811" href="#L811">811</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.observer, saved_observer)
+<a class="ln" id="L812" href="#L812">812</a>  <span class="kw">perform</span> <span class="fn">ref_set</span>(r.owner, saved_owner)
+<a class="ln" id="L813" href="#L813">813</a>  v
+<a class="ln" id="L814" href="#L814">814</a>}
+<a class="ln" id="L815" href="#L815">815</a>
+<a class="ln" id="L816" href="#L816">816</a><span class="com">// ---- looking at the graph -----------------------------------------------------------------</span>
+<a class="ln" id="L817" href="#L817">817</a>
+<a class="ln" id="L818" href="#L818">818</a><span class="kw">fn</span> <span class="fn">digit</span>(<span class="var">d</span>: u64): <span class="ty">Text</span> ! {overflow} {
+<a class="ln" id="L819" href="#L819">819</a>  <span class="kw">match</span> <span class="fn">Text::slice</span>(<span class="str">&quot;0123456789&quot;</span>, d, d + <span class="num">1</span>) {
+<a class="ln" id="L820" href="#L820">820</a>    <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L821" href="#L821">821</a>    <span class="ty">None</span> =&gt; <span class="str">&quot;0&quot;</span>
+<a class="ln" id="L822" href="#L822">822</a>  }
+<a class="ln" id="L823" href="#L823">823</a>}
+<a class="ln" id="L824" href="#L824">824</a>
+<a class="ln" id="L825" href="#L825">825</a><span class="kw">fn</span> <span class="fn">num</span>(<span class="var">n</span>: u64): <span class="ty">Text</span> ! {div, overflow} {
+<a class="ln" id="L826" href="#L826">826</a>  <span class="kw">if</span> n &lt; <span class="num">10</span> { <a href="#L818"><span class="fn">digit</span></a>(n) } <span class="kw">else</span> { <span class="fn">concat</span>(<a href="#L825"><span class="fn">num</span></a>(<span class="fn">div</span>(n, <span class="num">10</span>)), <a href="#L818"><span class="fn">digit</span></a>(<span class="fn">mod</span>(n, <span class="num">10</span>))) }
+<a class="ln" id="L827" href="#L827">827</a>}
+<a class="ln" id="L828" href="#L828">828</a>
+<a class="ln" id="L829" href="#L829">829</a><span class="com">// Gives the signal a name that `graph` shows. Returns the signal.</span>
+<a class="ln" id="L830" href="#L830">830</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">label</span>&lt;<span class="ty">T</span>: <span class="ty">Shared</span> + <span class="ty">NoBorrow</span>&gt;(
+<a class="ln" id="L831" href="#L831">831</a>  <span class="var">s</span>: <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>),
+<a class="ln" id="L832" href="#L832">832</a>  <span class="var">name</span>: <span class="ty">Text</span>
+<a class="ln" id="L833" href="#L833">833</a>): <span class="ty">delim::src::signal::Signal</span>(<span class="ty">T</span>) ! {rt} {
+<a class="ln" id="L834" href="#L834">834</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L835" href="#L835">835</a>  <a href="#L131"><span class="fn">alone_with</span></a>(r.names, (m) =&gt; {
+<a class="ln" id="L836" href="#L836">836</a>    <span class="fn">HashMap::insert</span>(&amp;<span class="kw">mut</span> m, s.id, name)
+<a class="ln" id="L837" href="#L837">837</a>    #()
+<a class="ln" id="L838" href="#L838">838</a>  })
+<a class="ln" id="L839" href="#L839">839</a>  s
+<a class="ln" id="L840" href="#L840">840</a>}
+<a class="ln" id="L841" href="#L841">841</a>
+<a class="ln" id="L842" href="#L842">842</a><span class="kw">fn</span> <span class="fn">name_of</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">id</span>: u64): <span class="ty">Text</span> ! {wait, div, overflow, mutex_claim} {
+<a class="ln" id="L843" href="#L843">843</a>  <span class="kw">let</span> n := <a href="#L131"><span class="fn">alone_with</span></a>(r.names, (m) =&gt; <span class="kw">match</span> <span class="fn">HashMap::get</span>(&amp;m, &amp;id) {
+<a class="ln" id="L844" href="#L844">844</a>    <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L845" href="#L845">845</a>    <span class="ty">Some</span>(x) =&gt; <a href="#L136"><span class="fn">own</span></a>(&amp;x)
+<a class="ln" id="L846" href="#L846">846</a>  })
+<a class="ln" id="L847" href="#L847">847</a>  <span class="kw">if</span> n == <span class="str">&quot;&quot;</span> { <a href="#L825"><span class="fn">num</span></a>(id) } <span class="kw">else</span> { <span class="fn">concat</span>(<span class="fn">concat</span>(n, <span class="str">&quot;#&quot;</span>), <a href="#L825"><span class="fn">num</span></a>(id)) }
+<a class="ln" id="L848" href="#L848">848</a>}
+<a class="ln" id="L849" href="#L849">849</a>
+<a class="ln" id="L850" href="#L850">850</a><span class="kw">fn</span> <span class="fn">names_of</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">ids</span>: <span class="ty">List</span>(u64)): <span class="ty">Text</span> ! {wait, div, overflow, mutex_claim} {
+<a class="ln" id="L851" href="#L851">851</a>  <span class="kw">match</span> ids {
+<a class="ln" id="L852" href="#L852">852</a>    <span class="ty">Nil</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L853" href="#L853">853</a>    <span class="ty">Cons</span>(i, rest) =&gt; <span class="kw">match</span> rest {
+<a class="ln" id="L854" href="#L854">854</a>      <span class="ty">Nil</span> =&gt; <a href="#L842"><span class="fn">name_of</span></a>(r, i)
+<a class="ln" id="L855" href="#L855">855</a>      <span class="ty">Cons</span>(j, more) =&gt; <span class="fn">concat</span>(<span class="fn">concat</span>(<a href="#L842"><span class="fn">name_of</span></a>(r, i), <span class="str">&quot;, &quot;</span>), <a href="#L850"><span class="fn">names_of</span></a>(r, rest))
+<a class="ln" id="L856" href="#L856">856</a>    }
+<a class="ln" id="L857" href="#L857">857</a>  }
+<a class="ln" id="L858" href="#L858">858</a>}
+<a class="ln" id="L859" href="#L859">859</a>
+<a class="ln" id="L860" href="#L860">860</a><span class="kw">fn</span> <span class="fn">graph_line</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">id</span>: u64): <span class="ty">Text</span> ! {wait, div, overflow, mutex_claim} {
+<a class="ln" id="L861" href="#L861">861</a>  <span class="kw">let</span> readers := <a href="#L266"><span class="fn">keep_live</span></a>(r, id, <a href="#L159"><span class="fn">ids_at</span></a>(r.readers, id), <span class="ty">Nil</span>)
+<a class="ln" id="L862" href="#L862">862</a>  <span class="kw">let</span> sources := <a href="#L159"><span class="fn">ids_at</span></a>(r.sources, id)
+<a class="ln" id="L863" href="#L863">863</a>  <span class="kw">match</span> <a href="#L284"><span class="fn">find_watcher</span></a>(r, id) {
+<a class="ln" id="L864" href="#L864">864</a>    <span class="ty">Some</span>(w) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L865" href="#L865">865</a>      <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;watcher &quot;</span>, <a href="#L842"><span class="fn">name_of</span></a>(r, id)), <span class="str">&quot; reads [&quot;</span>),
+<a class="ln" id="L866" href="#L866">866</a>      <span class="fn">concat</span>(<a href="#L850"><span class="fn">names_of</span></a>(r, sources), <span class="str">&quot;]\n&quot;</span>)
+<a class="ln" id="L867" href="#L867">867</a>    )
+<a class="ln" id="L868" href="#L868">868</a>    <span class="ty">None</span> =&gt; <span class="kw">match</span> readers {
+<a class="ln" id="L869" href="#L869">869</a>      <span class="ty">Nil</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L870" href="#L870">870</a>      <span class="ty">Cons</span>(w, rest) =&gt; <span class="fn">concat</span>(
+<a class="ln" id="L871" href="#L871">871</a>        <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;signal &quot;</span>, <a href="#L842"><span class="fn">name_of</span></a>(r, id)), <span class="str">&quot; is read by [&quot;</span>),
+<a class="ln" id="L872" href="#L872">872</a>        <span class="fn">concat</span>(<a href="#L850"><span class="fn">names_of</span></a>(r, readers), <span class="str">&quot;]\n&quot;</span>)
+<a class="ln" id="L873" href="#L873">873</a>      )
+<a class="ln" id="L874" href="#L874">874</a>    }
+<a class="ln" id="L875" href="#L875">875</a>  }
+<a class="ln" id="L876" href="#L876">876</a>}
+<a class="ln" id="L877" href="#L877">877</a>
+<a class="ln" id="L878" href="#L878">878</a><span class="kw">fn</span> <span class="fn">graph_from</span>(<span class="var">r</span>: <a href="#L56"><span class="ty">Runtime</span></a>, <span class="var">id</span>: u64, <span class="var">end</span>: u64): <span class="ty">Text</span> ! {wait, div, overflow, mutex_claim} {
+<a class="ln" id="L879" href="#L879">879</a>  <span class="kw">if</span> id &gt;= end { <span class="str">&quot;&quot;</span> } <span class="kw">else</span> { <span class="fn">concat</span>(<a href="#L860"><span class="fn">graph_line</span></a>(r, id), <a href="#L878"><span class="fn">graph_from</span></a>(r, id + <span class="num">1</span>, end)) }
+<a class="ln" id="L880" href="#L880">880</a>}
+<a class="ln" id="L881" href="#L881">881</a>
+<a class="ln" id="L882" href="#L882">882</a><span class="com">// The signals that some watcher reads and the watchers with what they read, one line each, in</span>
+<a class="ln" id="L883" href="#L883">883</a><span class="com">// the order they were made. Name signals with `label` to find them.</span>
+<a class="ln" id="L884" href="#L884">884</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">graph</span>(): <span class="ty">Text</span> ! {rt, div, overflow} {
+<a class="ln" id="L885" href="#L885">885</a>  <span class="kw">let</span> r := <span class="kw">perform</span> <span class="fn">access_runtime</span>()
+<a class="ln" id="L886" href="#L886">886</a>  <a href="#L878"><span class="fn">graph_from</span></a>(r, <span class="num">1</span>, <span class="kw">perform</span> <span class="fn">ref_get</span>(r.next))
+<a class="ln" id="L887" href="#L887">887</a>}
+</code></pre>
+</html>

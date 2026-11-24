@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/codec.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/codec.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="com">// Codecs: how a value crosses between the browser and the server as text. A server function</span>
+<a class="ln" id="L2" href="#L2">2</a><span class="com">// and a resource carry the codecs of what they take and give, so both sides read the other</span>
+<a class="ln" id="L3" href="#L3">3</a><span class="com">// with the same codec, and a value that does not decode is refused rather than misread.</span>
+<a class="ln" id="L4" href="#L4">4</a>
+<a class="ln" id="L5" href="#L5">5</a><span class="kw">pub(open)</span> <span class="kw">struct</span> <span class="ty">Codec</span>(<span class="ty">A</span>: <span class="ty">Type</span>) {
+<a class="ln" id="L6" href="#L6">6</a>  <span class="com">// Stable wire-format descriptor; custom mappings MUST version their own schema.</span>
+<a class="ln" id="L7" href="#L7">7</a>  schema: <span class="ty">Text</span>,
+<a class="ln" id="L8" href="#L8">8</a>  encode: (<span class="var">a</span>: <span class="ty">A</span>) -&gt; <span class="ty">Text</span> ! {overflow, div},
+<a class="ln" id="L9" href="#L9">9</a>  decode: (<span class="var">t</span>: <span class="ty">Text</span>) -&gt; <span class="ty">Option</span>(<span class="ty">A</span>) ! {overflow, div}
+<a class="ln" id="L10" href="#L10">10</a>}
+<a class="ln" id="L11" href="#L11">11</a>
+<a class="ln" id="L12" href="#L12">12</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">text_codec</span>(): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">Text</span>) {
+<a class="ln" id="L13" href="#L13">13</a>  <span class="ty">Codec</span> { schema: <span class="str">&quot;text/utf8/v1&quot;</span>, encode: (<span class="var">a</span>: <span class="ty">Text</span>) =&gt; a, decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <span class="ty">Some</span>(t) }
+<a class="ln" id="L14" href="#L14">14</a>}
+<a class="ln" id="L15" href="#L15">15</a>
+<a class="ln" id="L16" href="#L16">16</a><span class="kw">fn</span> <span class="fn">digit_text</span>(<span class="var">d</span>: u64): <span class="ty">Text</span> ! {overflow} {
+<a class="ln" id="L17" href="#L17">17</a>  <span class="kw">match</span> <span class="fn">Text::slice</span>(<span class="str">&quot;0123456789&quot;</span>, d, d + <span class="num">1</span>) {
+<a class="ln" id="L18" href="#L18">18</a>    <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L19" href="#L19">19</a>    <span class="ty">None</span> =&gt; <span class="str">&quot;0&quot;</span>
+<a class="ln" id="L20" href="#L20">20</a>  }
+<a class="ln" id="L21" href="#L21">21</a>}
+<a class="ln" id="L22" href="#L22">22</a>
+<a class="ln" id="L23" href="#L23">23</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">u64_text</span>(<span class="var">n</span>: u64): <span class="ty">Text</span> ! {overflow, div} {
+<a class="ln" id="L24" href="#L24">24</a>  <span class="kw">if</span> n &lt; <span class="num">10</span> { <a href="#L16"><span class="fn">digit_text</span></a>(n) } <span class="kw">else</span> { <span class="fn">concat</span>(<a href="#L23"><span class="fn">u64_text</span></a>(<span class="fn">div</span>(n, <span class="num">10</span>)), <a href="#L16"><span class="fn">digit_text</span></a>(<span class="fn">mod</span>(n, <span class="num">10</span>))) }
+<a class="ln" id="L25" href="#L25">25</a>}
+<a class="ln" id="L26" href="#L26">26</a>
+<a class="ln" id="L27" href="#L27">27</a><span class="com">// The number the decimal digits of `t` from `i` write, or `None` for anything else, or for</span>
+<a class="ln" id="L28" href="#L28">28</a><span class="com">// a number above `u64`'s range.</span>
+<a class="ln" id="L29" href="#L29">29</a><span class="kw">fn</span> <span class="fn">u64_of_digits</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">i</span>: u64, <span class="var">acc</span>: u64): <span class="ty">Option</span>(u64) ! {overflow, div} {
+<a class="ln" id="L30" href="#L30">30</a>  <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L31" href="#L31">31</a>    <span class="ty">None</span> =&gt; <span class="ty">Some</span>(acc)
+<a class="ln" id="L32" href="#L32">32</a>    <span class="ty">Some</span>(b) =&gt; {
+<a class="ln" id="L33" href="#L33">33</a>      <span class="kw">let</span> c := <span class="fn">U64::of_u8</span>(b)
+<a class="ln" id="L34" href="#L34">34</a>      <span class="kw">if</span> c &lt; <span class="num">48</span> || c &gt; <span class="num">57</span> { <span class="ty">None</span> } <span class="kw">else</span> <span class="kw">if</span> acc &gt; <span class="fn">div</span>(<span class="num">18446744073709551615</span> - (c - <span class="num">48</span>), <span class="num">10</span>) {
+<a class="ln" id="L35" href="#L35">35</a>        <span class="ty">None</span>
+<a class="ln" id="L36" href="#L36">36</a>      } <span class="kw">else</span> { <a href="#L29"><span class="fn">u64_of_digits</span></a>(t, i + <span class="num">1</span>, acc * <span class="num">10</span> + (c - <span class="num">48</span>)) }
+<a class="ln" id="L37" href="#L37">37</a>    }
+<a class="ln" id="L38" href="#L38">38</a>  }
+<a class="ln" id="L39" href="#L39">39</a>}
+<a class="ln" id="L40" href="#L40">40</a>
+<a class="ln" id="L41" href="#L41">41</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">u64_of_text</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(u64) ! {overflow, div} {
+<a class="ln" id="L42" href="#L42">42</a>  <span class="kw">if</span> <span class="fn">Text::len</span>(t) == <span class="num">0</span> { <span class="ty">None</span> } <span class="kw">else</span> { <a href="#L29"><span class="fn">u64_of_digits</span></a>(t, <span class="num">0</span>, <span class="num">0</span>) }
+<a class="ln" id="L43" href="#L43">43</a>}
+<a class="ln" id="L44" href="#L44">44</a>
+<a class="ln" id="L45" href="#L45">45</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">u64_codec</span>(): <a href="#L5"><span class="ty">Codec</span></a>(u64) {
+<a class="ln" id="L46" href="#L46">46</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L47" href="#L47">47</a>    schema: <span class="str">&quot;u64/decimal/v1&quot;</span>,
+<a class="ln" id="L48" href="#L48">48</a>    encode: (<span class="var">a</span>: u64) =&gt; <a href="#L23"><span class="fn">u64_text</span></a>(a),
+<a class="ln" id="L49" href="#L49">49</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <a href="#L41"><span class="fn">u64_of_text</span></a>(t)
+<a class="ln" id="L50" href="#L50">50</a>  }
+<a class="ln" id="L51" href="#L51">51</a>}
+<a class="ln" id="L52" href="#L52">52</a>
+<a class="ln" id="L53" href="#L53">53</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">bool_codec</span>(): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">Bool</span>) {
+<a class="ln" id="L54" href="#L54">54</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L55" href="#L55">55</a>    schema: <span class="str">&quot;bool/true-false/v1&quot;</span>,
+<a class="ln" id="L56" href="#L56">56</a>    encode: (<span class="var">a</span>: <span class="ty">Bool</span>) =&gt; <span class="kw">if</span> a { <span class="str">&quot;true&quot;</span> } <span class="kw">else</span> { <span class="str">&quot;false&quot;</span> },
+<a class="ln" id="L57" href="#L57">57</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <span class="kw">if</span> t == <span class="str">&quot;true&quot;</span> { <span class="ty">Some</span>(<span class="kw">true</span>) } <span class="kw">else</span> <span class="kw">if</span> t == <span class="str">&quot;false&quot;</span> { <span class="ty">Some</span>(<span class="kw">false</span>) } <span class="kw">else</span> {
+<a class="ln" id="L58" href="#L58">58</a>      <span class="ty">None</span>
+<a class="ln" id="L59" href="#L59">59</a>    }
+<a class="ln" id="L60" href="#L60">60</a>  }
+<a class="ln" id="L61" href="#L61">61</a>}
+<a class="ln" id="L62" href="#L62">62</a>
+<a class="ln" id="L63" href="#L63">63</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">unit_codec</span>(): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">Unit</span>) {
+<a class="ln" id="L64" href="#L64">64</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L65" href="#L65">65</a>    schema: <span class="str">&quot;unit/empty/v1&quot;</span>,
+<a class="ln" id="L66" href="#L66">66</a>    encode: (<span class="var">a</span>: <span class="ty">Unit</span>) =&gt; <span class="str">&quot;&quot;</span>,
+<a class="ln" id="L67" href="#L67">67</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <span class="kw">if</span> t == <span class="str">&quot;&quot;</span> { <span class="ty">Some</span>(#()) } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L68" href="#L68">68</a>  }
+<a class="ln" id="L69" href="#L69">69</a>}
+<a class="ln" id="L70" href="#L70">70</a>
+<a class="ln" id="L71" href="#L71">71</a><span class="com">// A list, as each item's encoding after its length in bytes and `:`, so that an item may</span>
+<a class="ln" id="L72" href="#L72">72</a><span class="com">// hold any text.</span>
+<a class="ln" id="L73" href="#L73">73</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">list_codec</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>&gt;(<span class="var">c</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>)): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">List</span>(<span class="ty">A</span>)) {
+<a class="ln" id="L74" href="#L74">74</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L75" href="#L75">75</a>    schema: <span class="fn">concat</span>(<span class="str">&quot;list/length/v1:&quot;</span>, c.schema),
+<a class="ln" id="L76" href="#L76">76</a>    encode: (<span class="var">a</span>: <span class="ty">List</span>(<span class="ty">A</span>)) =&gt; <a href="#L83"><span class="fn">list_text</span></a>(c, a),
+<a class="ln" id="L77" href="#L77">77</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <a href="#L127"><span class="fn">list_of_text</span></a>(c, t, <span class="num">0</span>, <span class="ty">Nil</span>)
+<a class="ln" id="L78" href="#L78">78</a>  }
+<a class="ln" id="L79" href="#L79">79</a>}
+<a class="ln" id="L80" href="#L80">80</a>
+<a class="ln" id="L81" href="#L81">81</a><span class="com">// Written into one buffer in a loop, so that a long list takes neither stack nor time</span>
+<a class="ln" id="L82" href="#L82">82</a><span class="com">// beyond its length.</span>
+<a class="ln" id="L83" href="#L83">83</a><span class="kw">fn</span> <span class="fn">list_text</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>&gt;(<span class="var">c</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>), <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">A</span>)): <span class="ty">Text</span> ! {overflow, div} {
+<a class="ln" id="L84" href="#L84">84</a>  <span class="kw">var</span> b := <span class="fn">Buf::new</span>()
+<a class="ln" id="L85" href="#L85">85</a>  <span class="kw">var</span> r := l
+<a class="ln" id="L86" href="#L86">86</a>  <span class="kw">var</span> go := <span class="kw">true</span>
+<a class="ln" id="L87" href="#L87">87</a>  <span class="kw">while</span> go {
+<a class="ln" id="L88" href="#L88">88</a>    <span class="kw">match</span> r {
+<a class="ln" id="L89" href="#L89">89</a>      <span class="ty">Nil</span> =&gt; { go := <span class="kw">false</span> }
+<a class="ln" id="L90" href="#L90">90</a>      <span class="ty">Cons</span>(x, rest) =&gt; {
+<a class="ln" id="L91" href="#L91">91</a>        <span class="kw">let</span> e := (c.encode)(x)
+<a class="ln" id="L92" href="#L92">92</a>        <span class="kw">let</span> n := <span class="fn">concat</span>(<a href="#L23"><span class="fn">u64_text</span></a>(<span class="fn">Text::len</span>(e)), <span class="str">&quot;:&quot;</span>)
+<a class="ln" id="L93" href="#L93">93</a>        <span class="fn">Buf::push</span>(&amp;<span class="kw">mut</span> b, &amp;n)
+<a class="ln" id="L94" href="#L94">94</a>        <span class="fn">Buf::push</span>(&amp;<span class="kw">mut</span> b, &amp;e)
+<a class="ln" id="L95" href="#L95">95</a>        r := rest
+<a class="ln" id="L96" href="#L96">96</a>      }
+<a class="ln" id="L97" href="#L97">97</a>    }
+<a class="ln" id="L98" href="#L98">98</a>  }
+<a class="ln" id="L99" href="#L99">99</a>  <span class="fn">Text::of</span>(b)
+<a class="ln" id="L100" href="#L100">100</a>}
+<a class="ln" id="L101" href="#L101">101</a>
+<a class="ln" id="L102" href="#L102">102</a><span class="kw">fn</span> <span class="fn">reverse_onto</span>&lt;<span class="ty">A</span>&gt;(<span class="var">l</span>: <span class="ty">List</span>(<span class="ty">A</span>), <span class="var">acc</span>: <span class="ty">List</span>(<span class="ty">A</span>)): <span class="ty">List</span>(<span class="ty">A</span>) {
+<a class="ln" id="L103" href="#L103">103</a>  <span class="kw">match</span> l {
+<a class="ln" id="L104" href="#L104">104</a>    <span class="ty">Nil</span> =&gt; acc
+<a class="ln" id="L105" href="#L105">105</a>    <span class="ty">Cons</span>(x, rest) =&gt; <a href="#L102"><span class="fn">reverse_onto</span></a>(rest, <span class="ty">Cons</span>(x, acc))
+<a class="ln" id="L106" href="#L106">106</a>  }
+<a class="ln" id="L107" href="#L107">107</a>}
+<a class="ln" id="L108" href="#L108">108</a>
+<a class="ln" id="L109" href="#L109">109</a><span class="com">// The length before the `:` at `i`, and where the item starts.</span>
+<a class="ln" id="L110" href="#L110">110</a><span class="kw">fn</span> <span class="fn">length_at</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">i</span>: u64, <span class="var">acc</span>: u64): <span class="ty">Option</span>(u64 × u64) ! {overflow, div} {
+<a class="ln" id="L111" href="#L111">111</a>  <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L112" href="#L112">112</a>    <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L113" href="#L113">113</a>    <span class="ty">Some</span>(b) =&gt; {
+<a class="ln" id="L114" href="#L114">114</a>      <span class="kw">let</span> c := <span class="fn">U64::of_u8</span>(b)
+<a class="ln" id="L115" href="#L115">115</a>      <span class="kw">if</span> c == <span class="num">58</span> { <span class="ty">Some</span>(#(acc, i + <span class="num">1</span>)) } <span class="kw">else</span> <span class="kw">if</span> c &lt; <span class="num">48</span> || c &gt; <span class="num">57</span> {
+<a class="ln" id="L116" href="#L116">116</a>        <span class="ty">None</span>
+<a class="ln" id="L117" href="#L117">117</a>      } <span class="kw">else</span> <span class="kw">if</span> acc &gt; <span class="fn">div</span>(<span class="num">18446744073709551615</span> - (c - <span class="num">48</span>), <span class="num">10</span>) { <span class="ty">None</span> } <span class="kw">else</span> {
+<a class="ln" id="L118" href="#L118">118</a>        <a href="#L110"><span class="fn">length_at</span></a>(t, i + <span class="num">1</span>, acc * <span class="num">10</span> + (c - <span class="num">48</span>))
+<a class="ln" id="L119" href="#L119">119</a>      }
+<a class="ln" id="L120" href="#L120">120</a>    }
+<a class="ln" id="L121" href="#L121">121</a>  }
+<a class="ln" id="L122" href="#L122">122</a>}
+<a class="ln" id="L123" href="#L123">123</a>
+<a class="ln" id="L124" href="#L124">124</a><span class="com">// The items from `i`, the ones read so far newest first in `acc`. Each step calls itself last,</span>
+<a class="ln" id="L125" href="#L125">125</a><span class="com">// so a list of many items runs as a loop rather than a frame for each item. A length larger</span>
+<a class="ln" id="L126" href="#L126">126</a><span class="com">// than what is left of `t` is refused before `start + len` is added, so it cannot overflow.</span>
+<a class="ln" id="L127" href="#L127">127</a><span class="kw">fn</span> <span class="fn">list_of_text</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>&gt;(
+<a class="ln" id="L128" href="#L128">128</a>  <span class="var">c</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>),
+<a class="ln" id="L129" href="#L129">129</a>  <span class="var">t</span>: <span class="ty">Text</span>,
+<a class="ln" id="L130" href="#L130">130</a>  <span class="var">i</span>: u64,
+<a class="ln" id="L131" href="#L131">131</a>  <span class="var">acc</span>: <span class="ty">List</span>(<span class="ty">A</span>)
+<a class="ln" id="L132" href="#L132">132</a>): <span class="ty">Option</span>(<span class="ty">List</span>(<span class="ty">A</span>)) ! {overflow, div} {
+<a class="ln" id="L133" href="#L133">133</a>  <span class="kw">if</span> i == <span class="fn">Text::len</span>(t) { <span class="ty">Some</span>(<a href="#L102"><span class="fn">reverse_onto</span></a>(acc, <span class="ty">Nil</span>)) } <span class="kw">else</span> {
+<a class="ln" id="L134" href="#L134">134</a>    <span class="kw">match</span> <a href="#L110"><span class="fn">length_at</span></a>(t, i, <span class="num">0</span>) {
+<a class="ln" id="L135" href="#L135">135</a>      <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L136" href="#L136">136</a>      <span class="ty">Some</span>(p) =&gt; {
+<a class="ln" id="L137" href="#L137">137</a>        <span class="kw">let</span> #(len, start) := p
+<a class="ln" id="L138" href="#L138">138</a>        <span class="kw">if</span> start == i + <span class="num">1</span> || len &gt; <span class="fn">Text::len</span>(t) - start { <span class="ty">None</span> } <span class="kw">else</span> {
+<a class="ln" id="L139" href="#L139">139</a>          <span class="kw">match</span> <span class="fn">Text::slice</span>(t, start, start + len) {
+<a class="ln" id="L140" href="#L140">140</a>            <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L141" href="#L141">141</a>            <span class="ty">Some</span>(item) =&gt; <span class="kw">match</span> (c.decode)(item) {
+<a class="ln" id="L142" href="#L142">142</a>              <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L143" href="#L143">143</a>              <span class="ty">Some</span>(x) =&gt; <a href="#L127"><span class="fn">list_of_text</span></a>(c, t, start + len, <span class="ty">Cons</span>(x, acc))
+<a class="ln" id="L144" href="#L144">144</a>            }
+<a class="ln" id="L145" href="#L145">145</a>          }
+<a class="ln" id="L146" href="#L146">146</a>        }
+<a class="ln" id="L147" href="#L147">147</a>      }
+<a class="ln" id="L148" href="#L148">148</a>    }
+<a class="ln" id="L149" href="#L149">149</a>  }
+<a class="ln" id="L150" href="#L150">150</a>}
+<a class="ln" id="L151" href="#L151">151</a>
+<a class="ln" id="L152" href="#L152">152</a><span class="com">// An optional value: empty for none, and `+` before the value's encoding for one.</span>
+<a class="ln" id="L153" href="#L153">153</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">option_codec</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>&gt;(<span class="var">c</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>)): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">Option</span>(<span class="ty">A</span>)) {
+<a class="ln" id="L154" href="#L154">154</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L155" href="#L155">155</a>    schema: <span class="fn">concat</span>(<span class="str">&quot;option/plus/v1:&quot;</span>, c.schema),
+<a class="ln" id="L156" href="#L156">156</a>    encode: (<span class="var">a</span>: <span class="ty">Option</span>(<span class="ty">A</span>)) =&gt; <span class="kw">match</span> a {
+<a class="ln" id="L157" href="#L157">157</a>      <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span>
+<a class="ln" id="L158" href="#L158">158</a>      <span class="ty">Some</span>(x) =&gt; <span class="fn">concat</span>(<span class="str">&quot;+&quot;</span>, (c.encode)(x))
+<a class="ln" id="L159" href="#L159">159</a>    },
+<a class="ln" id="L160" href="#L160">160</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <span class="kw">if</span> t == <span class="str">&quot;&quot;</span> { <span class="ty">Some</span>(<span class="ty">None</span>) } <span class="kw">else</span> {
+<a class="ln" id="L161" href="#L161">161</a>      <span class="kw">match</span> <span class="fn">Text::slice</span>(t, <span class="num">0</span>, <span class="num">1</span>) {
+<a class="ln" id="L162" href="#L162">162</a>        <span class="ty">Some</span>(h) =&gt; <span class="kw">if</span> h == <span class="str">&quot;+&quot;</span> {
+<a class="ln" id="L163" href="#L163">163</a>          <span class="kw">match</span> <span class="fn">Text::slice</span>(t, <span class="num">1</span>, <span class="fn">Text::len</span>(t)) {
+<a class="ln" id="L164" href="#L164">164</a>            <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L165" href="#L165">165</a>            <span class="ty">Some</span>(rest) =&gt; <span class="kw">match</span> (c.decode)(rest) {
+<a class="ln" id="L166" href="#L166">166</a>              <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L167" href="#L167">167</a>              <span class="ty">Some</span>(x) =&gt; <span class="ty">Some</span>(<span class="ty">Some</span>(x))
+<a class="ln" id="L168" href="#L168">168</a>            }
+<a class="ln" id="L169" href="#L169">169</a>          }
+<a class="ln" id="L170" href="#L170">170</a>        } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L171" href="#L171">171</a>        <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L172" href="#L172">172</a>      }
+<a class="ln" id="L173" href="#L173">173</a>    }
+<a class="ln" id="L174" href="#L174">174</a>  }
+<a class="ln" id="L175" href="#L175">175</a>}
+<a class="ln" id="L176" href="#L176">176</a>
+<a class="ln" id="L177" href="#L177">177</a><span class="com">// The codec of a type made from another's, such as a struct from a list or a pair: `to`</span>
+<a class="ln" id="L178" href="#L178">178</a><span class="com">// may refuse what it is given.</span>
+<a class="ln" id="L179" href="#L179">179</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">mapped_codec</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>, <span class="ty">B</span>: <span class="ty">Shared</span>&gt;(
+<a class="ln" id="L180" href="#L180">180</a>  <span class="var">schema</span>: <span class="ty">Text</span>,
+<a class="ln" id="L181" href="#L181">181</a>  <span class="var">c</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>),
+<a class="ln" id="L182" href="#L182">182</a>  <span class="var">to</span>: (<span class="var">a</span>: <span class="ty">A</span>) -&gt; <span class="ty">Option</span>(<span class="ty">B</span>) ! {overflow, div},
+<a class="ln" id="L183" href="#L183">183</a>  <span class="var">convert_back</span>: (<span class="var">b</span>: <span class="ty">B</span>) -&gt; <span class="ty">A</span> ! {overflow, div}
+<a class="ln" id="L184" href="#L184">184</a>): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">B</span>) {
+<a class="ln" id="L185" href="#L185">185</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L186" href="#L186">186</a>    schema: <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;mapped/v1:&quot;</span>, <a href="#L236"><span class="fn">schema_part</span></a>(schema)), <a href="#L236"><span class="fn">schema_part</span></a>(c.schema)),
+<a class="ln" id="L187" href="#L187">187</a>    encode: (<span class="var">b</span>: <span class="ty">B</span>) =&gt; (c.encode)(<span class="fn">convert_back</span>(b)),
+<a class="ln" id="L188" href="#L188">188</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <span class="kw">match</span> (c.decode)(t) {
+<a class="ln" id="L189" href="#L189">189</a>      <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L190" href="#L190">190</a>      <span class="ty">Some</span>(a) =&gt; <span class="fn">to</span>(a)
+<a class="ln" id="L191" href="#L191">191</a>    }
+<a class="ln" id="L192" href="#L192">192</a>  }
+<a class="ln" id="L193" href="#L193">193</a>}
+<a class="ln" id="L194" href="#L194">194</a>
+<a class="ln" id="L195" href="#L195">195</a><span class="kw">fn</span> <span class="fn">pair_text</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>, <span class="ty">B</span>: <span class="ty">Shared</span>&gt;(<span class="var">a</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>), <span class="var">b</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">B</span>), <span class="var">p</span>: <span class="ty">A</span> × <span class="ty">B</span>): <span class="ty">Text</span> ! {overflow, div} {
+<a class="ln" id="L196" href="#L196">196</a>  <span class="kw">match</span> p {
+<a class="ln" id="L197" href="#L197">197</a>    #(x, y) =&gt; {
+<a class="ln" id="L198" href="#L198">198</a>      <span class="kw">let</span> e := (a.encode)(x)
+<a class="ln" id="L199" href="#L199">199</a>      <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="fn">concat</span>(<a href="#L23"><span class="fn">u64_text</span></a>(<span class="fn">Text::len</span>(e)), <span class="str">&quot;:&quot;</span>), e), (b.encode)(y))
+<a class="ln" id="L200" href="#L200">200</a>    }
+<a class="ln" id="L201" href="#L201">201</a>  }
+<a class="ln" id="L202" href="#L202">202</a>}
+<a class="ln" id="L203" href="#L203">203</a>
+<a class="ln" id="L204" href="#L204">204</a><span class="com">// Two values, the first after its length in bytes and `:`.</span>
+<a class="ln" id="L205" href="#L205">205</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">pair_codec</span>&lt;<span class="ty">A</span>: <span class="ty">Shared</span>, <span class="ty">B</span>: <span class="ty">Shared</span>&gt;(<span class="var">a</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span>), <span class="var">b</span>: <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">B</span>)): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">A</span> × <span class="ty">B</span>) {
+<a class="ln" id="L206" href="#L206">206</a>  <span class="ty">Codec</span> {
+<a class="ln" id="L207" href="#L207">207</a>    schema: <span class="fn">concat</span>(
+<a class="ln" id="L208" href="#L208">208</a>      <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="fn">concat</span>(<span class="str">&quot;pair/length/v1:&quot;</span>, <span class="fn">Text::of_u64</span>(<span class="fn">Text::len</span>(a.schema))), <span class="str">&quot;:&quot;</span>), a.schema),
+<a class="ln" id="L209" href="#L209">209</a>      b.schema
+<a class="ln" id="L210" href="#L210">210</a>    ),
+<a class="ln" id="L211" href="#L211">211</a>    encode: (<span class="var">p</span>: <span class="ty">A</span> × <span class="ty">B</span>) =&gt; <a href="#L195"><span class="fn">pair_text</span></a>(a, b, p),
+<a class="ln" id="L212" href="#L212">212</a>    decode: (<span class="var">t</span>: <span class="ty">Text</span>) =&gt; <span class="kw">match</span> <a href="#L110"><span class="fn">length_at</span></a>(t, <span class="num">0</span>, <span class="num">0</span>) {
+<a class="ln" id="L213" href="#L213">213</a>      <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L214" href="#L214">214</a>      <span class="ty">Some</span>(l) =&gt; {
+<a class="ln" id="L215" href="#L215">215</a>        <span class="kw">let</span> #(len, start) := l
+<a class="ln" id="L216" href="#L216">216</a>        <span class="kw">if</span> start == <span class="num">1</span> { <span class="ty">None</span> } <span class="kw">else</span> {
+<a class="ln" id="L217" href="#L217">217</a>          <span class="kw">match</span> <span class="fn">Text::slice</span>(t, start, start + len) {
+<a class="ln" id="L218" href="#L218">218</a>            <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L219" href="#L219">219</a>            <span class="ty">Some</span>(x) =&gt; <span class="kw">match</span> <span class="fn">Text::slice</span>(t, start + len, <span class="fn">Text::len</span>(t)) {
+<a class="ln" id="L220" href="#L220">220</a>              <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L221" href="#L221">221</a>              <span class="ty">Some</span>(y) =&gt; <span class="kw">match</span> (a.decode)(x) {
+<a class="ln" id="L222" href="#L222">222</a>                <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L223" href="#L223">223</a>                <span class="ty">Some</span>(va) =&gt; <span class="kw">match</span> (b.decode)(y) {
+<a class="ln" id="L224" href="#L224">224</a>                  <span class="ty">None</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L225" href="#L225">225</a>                  <span class="ty">Some</span>(vb) =&gt; <span class="ty">Some</span>(#(va, vb))
+<a class="ln" id="L226" href="#L226">226</a>                }
+<a class="ln" id="L227" href="#L227">227</a>              }
+<a class="ln" id="L228" href="#L228">228</a>            }
+<a class="ln" id="L229" href="#L229">229</a>          }
+<a class="ln" id="L230" href="#L230">230</a>        }
+<a class="ln" id="L231" href="#L231">231</a>      }
+<a class="ln" id="L232" href="#L232">232</a>    }
+<a class="ln" id="L233" href="#L233">233</a>  }
+<a class="ln" id="L234" href="#L234">234</a>}
+<a class="ln" id="L235" href="#L235">235</a>
+<a class="ln" id="L236" href="#L236">236</a><span class="kw">fn</span> <span class="fn">schema_part</span>(<span class="var">value</span>: <span class="ty">Text</span>): <span class="ty">Text</span> {
+<a class="ln" id="L237" href="#L237">237</a>  <span class="fn">concat</span>(<span class="fn">concat</span>(<span class="fn">Text::of_u64</span>(<span class="fn">Text::len</span>(value)), <span class="str">&quot;:&quot;</span>), value)
+<a class="ln" id="L238" href="#L238">238</a>}
+<a class="ln" id="L239" href="#L239">239</a>
+<a class="ln" id="L240" href="#L240">240</a><span class="com">// The fields of a form, each its name and its text, in the order the form has them. A server</span>
+<a class="ln" id="L241" href="#L241">241</a><span class="com">// function that takes this can be sent from a page without JavaScript (`web_form.taut`).</span>
+<a class="ln" id="L242" href="#L242">242</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">form_codec</span>(): <a href="#L5"><span class="ty">Codec</span></a>(<span class="ty">List</span>(<span class="ty">Text</span> × <span class="ty">Text</span>)) { <a href="#L73"><span class="fn">list_codec</span></a>(<a href="#L205"><span class="fn">pair_codec</span></a>(<a href="#L12"><span class="fn">text_codec</span></a>(), <a href="#L12"><span class="fn">text_codec</span></a>())) }
+</code></pre>
+</html>
