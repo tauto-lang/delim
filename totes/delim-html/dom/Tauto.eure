@@ -1,0 +1,52 @@
+package {
+  name = "dom"
+  version = "0.1.0"
+}
+exports = ["start", "start_island", "island_page", "start_loading", "start_disabled"]
+javascript {
+  extern {
+    dom_root = "host/dom.mjs#root"
+    dom_hydrate_root = "host/dom.mjs#hydrateRoot"
+    dom_props = "host/dom.mjs#props"
+    dom_settle = "host/dom.mjs#settle"
+    dom_island = "host/dom.mjs#island"
+    dom_trusted = "host/dom.mjs#trusted"
+    dom_create = "host/dom.mjs#create"
+    dom_text = "host/dom.mjs#text"
+    dom_group = "host/dom.mjs#group"
+    dom_attr = "host/dom.mjs#attr"
+    dom_value = "host/dom.mjs#value"
+    dom_remove_attr = "host/dom.mjs#removeAttr"
+    dom_bool = "host/dom.mjs#boolean"
+    dom_disabled = "host/dom.mjs#disabled"
+    dom_set_text = "host/dom.mjs#setText"
+    dom_append = "host/dom.mjs#append"
+    dom_insert_before = "host/dom.mjs#insertBefore"
+    dom_remove = "host/dom.mjs#remove"
+    dom_mount = "host/dom.mjs#mount"
+    dom_next = "host/dom.mjs#next"
+    host_load_ok = "host/dom.mjs#loadOk"
+    host_load_text = "host/dom.mjs#loadText"
+    host_event_open = "host/dom.mjs#eventOpen"
+    host_event_node = "host/dom.mjs#eventNode"
+    host_event_code = "host/dom.mjs#eventCode"
+    host_event_text = "host/dom.mjs#eventText"
+    host_event_x = "host/dom.mjs#eventX"
+    host_event_y = "host/dom.mjs#eventY"
+    host_event_button = "host/dom.mjs#eventButton"
+    dom_unlisten = "host/dom.mjs#unlisten"
+    dom_load = "host/dom.mjs#load"
+    dom_sleep = "host/dom.mjs#sleep"
+    dom_svg = "host/dom.mjs#svg"
+    dom_var = "host/dom.mjs#styleVar"
+    dom_drag = "host/dom.mjs#drag"
+    dom_parent = "host/dom.mjs#parent"
+    dom_warn = "host/dom.mjs#warn"
+  }
+  types {
+    Doc = "host/dom.mjs#release"
+    HostLoad = "host/dom.mjs#dropAnswer"
+    HostEvent = "host/dom.mjs#dropAnswer"
+  }
+  sources = ["host"]
+}

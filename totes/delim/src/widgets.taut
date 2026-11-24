@@ -1,0 +1,66 @@
+import "signal.taut" { Signal, get, rt }
+import "tree.taut" { EventData, EventKind, Node, Prop, Tree, el, text }
+import "common.taut" { Role, Vocab }
+
+// Components every renderer can show, written only with the renderer's `Vocab`.
+
+pub fn column<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  v: Vocab(K, P),
+  props: List(Prop(P)),
+  children: List(Node)
+): Node ! {rt, div, overflow} where DecEq(P) {
+  el(t, v.column, props, children)
+}
+
+pub fn row<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  v: Vocab(K, P),
+  props: List(Prop(P)),
+  children: List(Node)
+): Node ! {rt, div, overflow} where DecEq(P) {
+  el(t, v.row, props, children)
+}
+
+// A button named `label`, showing it, running `press` when pressed.
+pub fn button<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  v: Vocab(K, P),
+  label: Text,
+  press: () -> Unit ! {rt, div}
+): Node ! {rt, div, overflow} where DecEq(P) {
+  el(
+    t,
+    v.pressable,
+    Cons(Static((v.role)(Button(label))), Cons(On(Press, (d: EventData) => press()), Nil)),
+    Cons(text(t, label), Nil)
+  )
+}
+
+// An input field named `label` showing `value`, and giving each committed text to `edit`.
+pub fn text_input<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  v: Vocab(K, P),
+  label: Text,
+  value: delim::src::signal::Signal(Text),
+  edit: (s: Text) -> Unit ! {rt, div}
+): Node ! {rt, div, overflow} where DecEq(P) {
+  el(
+    t,
+    v.input,
+    Cons(
+      Static((v.role)(TextField(label))),
+      Cons(
+        Dyn(() => (v.value)(get(value))),
+        Cons(On(Edit, (d: EventData) => match d {
+          NoData => #()
+          KeyData(k) => #()
+          TextData(s) => edit(s)
+          Pointer(x, y, b) => #()
+          ScrollData(dx, dy) => #()
+        }), Nil)
+      )
+    ),
+    Nil
+  )
+}

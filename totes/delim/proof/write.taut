@@ -1,0 +1,35 @@
+import std::text { Text }
+import "../../delim-html/src/write.taut" { HTree, write, write_all }
+
+// What `write` makes of some trees, computed by the kernel. `write_safe` in `src/write.taut`
+// says that `html_safe` accepts it for every tree.
+
+fn b(t: Text): List(Nat) { Text::bytes(t) }
+
+fn attr(n: Text, v: Text): @name List(Nat) × @value List(Nat) { #(@name b(n), @value b(v)) }
+
+theorem writes_escaped(): write(
+  HEl(b("p"), [attr("title", "a\"b")], [HText(b("<x> & y"))])
+) = b("<p title=\"a&quot;b\">&lt;x&gt; &amp; y</p>") {
+  Refl
+}
+
+// A handler and a URL that runs code are left out, and a void element has no end tag.
+theorem leaves_out(): write(
+  HEl(
+    b("a"),
+    [attr("onclick", "x()"), attr("href", "javascript:x()"), attr("class", "c")],
+    [HEl(b("br"), Nil, [HText(b("dropped"))])]
+  )
+) = b("<a class=\"c\"><br></a>") {
+  Refl
+}
+
+// A tag that is not on the list is not written, but its text still is, escaped.
+theorem drops_script(): write(HEl(b("script"), Nil, [HText(b("alert(1)"))])) = b("alert(1)") {
+  Refl
+}
+
+theorem writes_marks(): write_all([HMark(b("12")), HText(b("a")), HMark(b("x"))]) = b("<!--12-->a") {
+  Refl
+}

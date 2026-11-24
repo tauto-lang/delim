@@ -1,0 +1,123 @@
+import std::builtin::par {
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  wait,
+  weak_get,
+  weak_of
+}
+import "site.taut" { Layout, Page, generate_missing }
+import std::builtin::os {
+  argv,
+  exit,
+  fs_create_dir,
+  fs_write,
+  fs_write_bytes,
+  hash_seed,
+  print,
+  stderr,
+  stdout
+}
+import "route.taut" { Route }
+import "resource.taut" { Answer, load }
+
+// The framework's entry: a program that writes its pages ahead of time (`generate <dir>`).
+
+pub(open) struct(shared) App(!e) {
+  // The pages written by `generate`, each at its route's path.
+  routes: List(Route),
+  // The loaders of the resources the pages read, made by `loading`.
+  resources: List(Answer(!e)),
+  // Files written by `generate` at their paths, such as `text_asset("/style.css", css)` or
+  // `#(@path "/app.wasm", @body wasm)`. A path starts with `/` and has no `.` or `..` segment.
+  assets: List(@path Text × @body Bytes),
+  // How `generate` names the files of the pages.
+  layout: Layout,
+  // The page `generate` writes as `/404.html`, which static hosts answer a path they have no
+  // file for with; `None` writes none.
+  not_found: Option(Page)
+}
+
+pub fn usage(): Text { "usage: generate <dir>" }
+
+fn pairs_of(rs: List(Route)): List(Text × Page) {
+  match rs {
+    Nil => Nil
+    Cons(r, rest) => Cons(#(r.path, r.page), pairs_of(rest))
+  }
+}
+
+// `generate <dir>` from the command line. It needs `--allow-write` and nothing else.
+pub fn generate_app<!e>(a: App(!e)): Unit ! {
+  overflow,
+  wait,
+  argv,
+  stdout,
+  stderr,
+  exit,
+  fs_write,
+  fs_write_bytes,
+  fs_create_dir,
+  div,
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of,
+  hash_seed
+} ∪ e {
+  match perform argv() {
+    Cons(cmd, Cons(arg, rest)) => if cmd == "generate" { generate_to(a, arg) } else {
+      print(usage())
+    }
+    Nil => print(usage())
+    Cons(_, Nil) => print(usage())
+  }
+}
+
+// Writes the pages and assets of `a` under `dir`. A failure is written to standard error and
+// ends the program with exit code 1.
+pub fn generate_to<!e>(a: App(!e), dir: Text): Unit ! {
+  overflow,
+  wait,
+  stdout,
+  stderr,
+  exit,
+  fs_write,
+  fs_write_bytes,
+  fs_create_dir,
+  div,
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of,
+  hash_seed
+} ∪ e {
+  match generate_missing(
+    dir,
+    a.layout,
+    pairs_of(a.routes),
+    a.not_found,
+    (k: Text) => load(a.resources, k),
+    a.assets
+  ) {
+    Ok(u) => print("generated")
+    Err(why) => {
+      perform stderr(why)
+      perform exit(1)
+    }
+  }
+}

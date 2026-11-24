@@ -1,0 +1,389 @@
+import std::base { List }
+import std::builtin::macro {
+  Syn,
+  SynArm,
+  SynCtor,
+  SynCtx,
+  SynData,
+  SynExpr,
+  SynFn,
+  SynIdent,
+  SynPattern,
+  SynRowEntry,
+  SynSpan,
+  SynStmt,
+  SynToken,
+  macro_error
+}
+import "route_value.taut" {
+  RouteError,
+  RoutePart,
+  RouteSpec,
+  route_bool_codec,
+  route_match,
+  route_query_item,
+  route_read,
+  route_read_or,
+  route_read_segment,
+  route_segment_item
+}
+import "codec.taut" { text_codec, u64_codec }
+
+syntax!(route_syntax, ```par
+%start Decl
+%title "route"
+%%
+Decl: Name Path { Parameter };
+Path: Literal { PathPart };
+PathPart: Literal | Capture;
+Capture: LBrace Name Colon Name RBrace;
+Parameter: Separator Name Equals LBrace Name Colon Name [ Default ] RBrace;
+Separator: Question | Amp;
+Default: Equals DefaultValue;
+DefaultValue: Name | TautoExpr;
+Question: '?';
+Amp: '&';
+Equals: '=';
+LBrace: '{';
+RBrace: '}';
+Colon: ':';
+Literal: /\/[A-Za-z0-9_~.\/-]*/;
+Name: /[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*/;
+```) => struct Decl, struct Path, enum PathPart, struct Capture, struct Parameter, enum Separator, struct Default, enum DefaultValue, fn parse
+
+module RouteMacro {
+  fn local_ident(
+    name: Text,
+    at: SynSpan
+  ): SynIdent { SynIdent { declaration: None, name: name, ctx: SynCtx { scopes: Nil }, span: at } }
+  struct Field {
+    key: SynToken,
+    name: SynToken,
+    ty: SynToken,
+    fallback: Option(SynExpr),
+    segment: Bool
+  }
+  struct PathPiece { literal: Option(Text), field: Option(Field) }
+
+  fn contains(values: List(Text), value: Text): Bool ! {div} {
+    match values { Nil => false
+      Cons(item, rest) => item == value || contains(rest, value) }
+  }
+  fn scoped(value: Text, index: u64): Bool ! {overflow, div} {
+    match Text::byte(value, index) { None => false
+      Some(byte) => U64::of_u8(byte) == 58 || scoped(value, index + 1) }
+  }
+  fn ends_with_slash(value: Text): Bool ! {overflow, div} {
+    match Text::byte(value, Text::len(value) - 1) { None => false
+      Some(byte) => U64::of_u8(byte) == 47 }
+  }
+  // Each capture fills one whole segment: the text before it ends with `/`, and the next piece starts with `/`.
+  fn path_pieces(
+    items: List(route_syntax::PathPart),
+    names: List(Text),
+    after_slash: Bool
+  ): List(PathPiece) ! {overflow, macro_error, div} {
+    match items {
+      Nil => Nil
+      Cons(item, rest) => match item {
+        route_syntax::PathPart::Literal(token) =>
+        Cons(
+          PathPiece { literal: Some(token.text), field: None },
+          path_pieces(rest, names, ends_with_slash(token.text))
+        )
+        route_syntax::PathPart::Capture(capture) => {
+          if not(after_slash) {
+            Syn::error(capture.span, "route: a path parameter must fill a whole segment after /")
+          } else { #() }
+          if scoped(capture.name.text, 0) {
+            Syn::error(capture.name.span, "route: field names must be unqualified identifiers")
+          } else { #() }
+          if contains(
+            names,
+            capture.name.text
+          ) { Syn::error(capture.name.span, "route: duplicate field name") } else { #() }
+          Cons(
+            PathPiece {
+              literal: None,
+              field: Some(
+                Field {
+                  key: capture.name,
+                  name: capture.name,
+                  ty: capture.name_2,
+                  fallback: None,
+                  segment: true
+                }
+              )
+            },
+            path_pieces(rest, Cons(capture.name.text, names), false)
+          )
+        }
+      }
+    }
+  }
+  fn piece_fields(items: List(PathPiece)): List(Field) ! {div} {
+    match items { Nil => Nil
+      Cons(item, rest) => match item.field { None => piece_fields(rest)
+        Some(field) => Cons(field, piece_fields(rest)) } }
+  }
+  fn field_names_of(items: List(Field)): List(Text) ! {div} {
+    match items { Nil => Nil
+      Cons(item, rest) => Cons(item.name.text, field_names_of(rest)) }
+  }
+  fn fields(
+    items: List(route_syntax::Parameter),
+    keys: List(Text),
+    names: List(Text),
+    first: Bool
+  ): List(Field) ! {overflow, macro_error, div} {
+    match items {
+      Nil => Nil
+      Cons(item, rest) => {
+        let valid_separator := match item.separator {
+          route_syntax::Separator::Question(_) => first
+          route_syntax::Separator::Amp(_) => not(first)
+        }
+        if not(valid_separator) {
+          Syn::error(item.span, "route: query parameters start with ? and continue with &")
+        } else { #() }
+        if scoped(item.name.text, 0) || scoped(item.name_2.text, 0) {
+          Syn::error(item.span, "route: query keys and field names must be unqualified identifiers")
+        } else { #() }
+        if contains(
+          keys,
+          item.name.text
+        ) { Syn::error(item.name.span, "route: duplicate query key") } else { #() }
+        if contains(
+          names,
+          item.name_2.text
+        ) { Syn::error(item.name_2.span, "route: duplicate field name") } else { #() }
+        let fallback := match item.default {
+          None => None
+          Some(value) => Some(match value.default_value {
+            route_syntax::DefaultValue::Name(token) => ExVar(Syn::ident(token))
+            route_syntax::DefaultValue::TautoExpr(expression) => expression
+          })
+        }
+        Cons(
+          Field {
+            key: item.name,
+            name: item.name_2,
+            ty: item.name_3,
+            fallback: fallback,
+            segment: false
+          },
+          fields(rest, Cons(item.name.text, keys), Cons(item.name_2.text, names), false)
+        )
+      }
+    }
+  }
+  fn global(name: Text): SynExpr { ExVar(Syn::global(name)) }
+  fn apply(name: Text, args: List(SynExpr), at: SynSpan): SynExpr { ExApp(global(name), args, at) }
+  fn named(
+    name: SynIdent,
+    args: List(SynExpr),
+    at: SynSpan
+  ): SynExpr { ExApp(ExVar(name), args, at) }
+  fn method(
+    owner: SynIdent,
+    suffix: Text
+  ): SynIdent { Syn::decl_name(owner, concat(owner.name, concat("::", suffix))) }
+  fn codec(ty: SynToken): SynExpr {
+    if ty.text == "Text" { apply("text_codec", Nil, ty.span) } else if ty.text == "u64" {
+      apply("u64_codec", Nil, ty.span)
+    } else if ty.text == "Bool" { apply("route_bool_codec", Nil, ty.span) } else {
+      named(Syn::ident_like(Syn::ident(ty), concat(ty.text, "::route_codec")), Nil, ty.span)
+    }
+  }
+  fn data_fields(items: List(Field)): List(Option(SynIdent) × SynExpr) ! {div} {
+    match items { Nil => Nil
+      Cons(item, rest) => Cons(
+        #(Some(Syn::ident(item.name)), ExVar(Syn::ident(item.ty))),
+        data_fields(rest)
+      ) }
+  }
+  fn bindings(items: List(Field)): List(SynExpr × Text) ! {div} {
+    match items { Nil => Nil
+      Cons(item, rest) => Cons(
+        #(
+          ExVar(local_ident(concat("_route_field_", item.name.text), item.name.span)),
+          item.name.text
+        ),
+        bindings(rest)
+      ) }
+  }
+  fn result_type(owner: SynIdent, at: SynSpan): SynExpr {
+    apply("Result", [ExVar(owner), global("RouteError")], at)
+  }
+  fn arm(
+    pattern: SynPattern,
+    body: SynExpr
+  ): SynArm { SynArm { pattern: pattern, guard: None, goal: None, body: body } }
+  fn ctor(
+    name: Text,
+    binder: SynIdent
+  ): SynPattern { PtCtor(Syn::global(name), [PtBind(binder, None)]) }
+
+  fn read_fields(
+    owner: SynIdent,
+    items: List(Field),
+    all: List(Field),
+    matched: SynIdent,
+    at: SynSpan
+  ): SynExpr ! {div} {
+    match items {
+      Nil => apply("Ok", [ExRecord(owner, bindings(all), at)], at)
+      Cons(item, rest) => {
+        let local := local_ident(concat("_route_field_", item.name.text), item.name.span)
+        let error := local_ident("_route_error", at)
+        let decoded := local_ident("_route_decoded", at)
+        let values := ExField(ExVar(matched), if item.segment { "segments" } else { "query" }, at)
+        let args := [codec(item.ty), values, ExText(item.key.text, item.key.span)]
+        let read := match item.fallback {
+          None => apply(if item.segment { "route_read_segment" } else { "route_read" }, args, at)
+          Some(value) => apply("route_read_or", Syn::append(args, [value]), at)
+        }
+        let ty := apply("Result", [ExVar(Syn::ident(item.ty)), global("RouteError")], at)
+        ExBlock(
+          [
+            StLet(decoded, Some(ty), read, false, false, None, at),
+            StExpr(
+              ExMatch(
+                ExVar(decoded),
+                Some(result_type(owner, at)),
+                [
+                  arm(ctor("Err", error), apply("Err", [ExVar(error)], at)),
+                  arm(ctor("Ok", local), read_fields(owner, rest, all, matched, at))
+                ],
+                None,
+                None,
+                at
+              )
+            )
+          ],
+          at
+        )
+      }
+    }
+  }
+  fn part_list(pieces: List(PathPiece), at: SynSpan): SynExpr ! {div} {
+    match pieces {
+      Nil => global("Nil")
+      Cons(piece, rest) => {
+        let part := match piece.field {
+          Some(field) => apply("RouteCapture", [ExText(field.name.text, field.name.span)], at)
+          None => apply("RouteLiteral", [ExText(match piece.literal { Some(text) => text
+            None => "" }, at)], at)
+        }
+        apply("Cons", [part, part_list(rest, at)], at)
+      }
+    }
+  }
+  fn parse_body(
+    owner: SynIdent,
+    pieces: List(PathPiece),
+    items: List(Field),
+    target: SynIdent,
+    at: SynSpan
+  ): SynExpr ! {div} {
+    let matched := local_ident("_route_match", at)
+    let error := local_ident("_route_error", at)
+    ExMatch(
+      apply("route_match", [ExVar(target), part_list(pieces, at)], at),
+      Some(result_type(owner, at)),
+      [
+        arm(ctor("Err", error), apply("Err", [ExVar(error)], at)),
+        arm(ctor("Ok", matched), read_fields(owner, items, items, matched, at))
+      ],
+      None,
+      None,
+      at
+    )
+  }
+  fn href_fields(items: List(Field), value: SynIdent, first: Bool, at: SynSpan): SynExpr ! {div} {
+    match items {
+      Nil => ExText("", at)
+      Cons(item, rest) => {
+        let encoded := encode_field(item, value, at)
+        let pair := apply("route_query_item", [ExText(item.key.text, item.key.span), encoded], at)
+        apply(
+          "concat",
+          [
+            ExText(if first { "?" } else { "&" }, at),
+            apply("concat", [pair, href_fields(rest, value, false, at)], at)
+          ],
+          at
+        )
+      }
+    }
+  }
+  fn encode_field(item: Field, value: SynIdent, at: SynSpan): SynExpr {
+    let encoder := ExField(codec(item.ty), "encode", at)
+    ExApp(encoder, [ExField(ExVar(value), item.name.text, item.name.span)], at)
+  }
+  fn href_path(
+    pieces: List(PathPiece),
+    value: SynIdent,
+    tail: SynExpr,
+    at: SynSpan
+  ): SynExpr ! {div} {
+    match pieces {
+      Nil => tail
+      Cons(piece, rest) => {
+        let part := match piece.field {
+          Some(field) => apply("route_segment_item", [encode_field(field, value, at)], at)
+          None => ExText(match piece.literal { Some(text) => text
+            None => "" }, at)
+        }
+        apply("concat", [part, href_path(rest, value, tail, at)], at)
+      }
+    }
+  }
+  fn function(
+    name: SynIdent,
+    params: List(SynIdent),
+    types: List(Option(SynExpr)),
+    result: SynExpr,
+    effects: List(SynRowEntry),
+    body: SynExpr,
+    at: SynSpan
+  ): SynStmt ! {div} {
+    StFn(SynFn { name: name, generics: Nil, generic_types: Nil, bounds: Nil, params: params,
+      r#borrows: nones(params), param_types: types, result: Some(result), effects: Some(effects), where_: Nil, body: body, span: at, unused: None, unused_generics: Nil, unused_params: Nil })
+  }
+  fn nones(params: List(SynIdent)): List(Option(Bool)) ! {div} {
+    match params { Nil => Nil
+      Cons(_, rest) => Cons(None, nones(rest)) }
+  }
+  pub fn make(decl: route_syntax::Decl): List(SynStmt) ! {overflow, macro_error, div} {
+    let owner := Syn::decl_name(Syn::ident(decl.name), decl.name.text)
+    let at := decl.span
+    let pieces := path_pieces(
+      Cons(route_syntax::PathPart::Literal(decl.path.literal), decl.path.path_part),
+      Nil,
+      false
+    )
+    let segments := piece_fields(pieces)
+    let query_items := fields(decl.parameter, Nil, field_names_of(segments), true)
+    let items := List::append(segments, query_items)
+    let value := local_ident("_route_value", at)
+    let target := local_ident("_route_target", at)
+    let href := method(owner, "href")
+    let parse := method(owner, "parse")
+    let spec := method(owner, "route")
+    [
+      StStruct(SynData { kind: Some("shared"), name: owner, generics: Nil, unused_generics: Nil,
+        ctors: [SynCtor { name: owner, fields: data_fields(items) }], span: at }),
+      function(href, [value], [Some(ExVar(owner))], global("Text"), [EffName("div", None), EffName("overflow", None)],
+        href_path(pieces, value, href_fields(query_items, value, true, at), at), at),
+      function(parse, [target], [Some(global("Text"))], result_type(owner, at), [EffName("div", None), EffName("overflow", None)],
+        parse_body(owner, pieces, items, target, at), at),
+      function(spec, Nil, Nil, apply("RouteSpec", [ExVar(owner)], at), Nil,
+        ExRecord(Syn::global("RouteSpec"), [#(ExVar(href), "href"), #(ExVar(parse), "parse")], at), at)
+    ]
+  }
+}
+
+pub macro fn route(decl: route_syntax::Decl): List(SynStmt) ! {overflow, macro_error, div} {
+  RouteMacro::make(decl)
+}

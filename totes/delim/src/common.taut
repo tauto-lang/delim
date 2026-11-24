@@ -1,0 +1,34 @@
+// What components shared by every renderer may use: a few element kinds and properties that
+// each renderer gives its own form, in a `Vocab`. The vocabulary is kept apart from the
+// `Tree`: the tree holds handlers, and a handler may hold the vocabulary.
+
+// What an element is to assistive technology. An element a person can act on carries its
+// name, so an unnamed button or link cannot be written.
+pub(open) enum Role {
+  Button(Text)
+  Link(Text)
+  Checkbox(Text)
+  TextField(Text)
+  Tab(Text)
+  MenuItem(Text)
+  Heading(u64)
+  ListBox
+  ListEntry
+  Region(Text)
+  Presentation
+}
+
+pub(open) struct Vocab(K: Type, P: Type) {
+  // Boxes laying out their children in a column and in a row, something to press, and an
+  // input field.
+  column: K,
+  row: K,
+  pressable: K,
+  input: K,
+  role: (r: Role) -> P,
+  // A further name for an element nobody acts on, such as an image.
+  name: (t: Text) -> P,
+  disabled: (b: Bool) -> P,
+  // The text an input field shows.
+  value: (t: Text) -> P
+}

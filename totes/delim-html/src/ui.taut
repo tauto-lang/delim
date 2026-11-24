@@ -1,0 +1,199 @@
+import std::text { Text }
+import "../../delim/src/signal.taut" { Signal, get, hold, rt, set, signal, watch }
+import "../../delim/src/tree.taut" {
+  EventData,
+  EventKind,
+  Node,
+  Patch,
+  Prop,
+  Tree,
+  current_event,
+  emit,
+  node_of,
+  switch_on,
+  switch_on_change,
+  text_dyn
+}
+import "markup.taut" { HtmlAttr, HtmlKind, web_vocab }
+import "../../delim/src/common.taut" { Vocab }
+import "../../delim/src/handle.taut" { ResourceState, resource_cancelled, resource_wait, state }
+import "../../delim/src/context.taut" { context, use_context, with_context }
+import "../../delim/src/keep.taut" { keep, keep_run, keep_value, keeping, rooted, ui, with_tree }
+
+// What a component of the web elements performs while it builds: the tree, keeping its parts
+// for later, and the signals. A component that reads a context names it too:
+// `{Delim, context(T)}`.
+pub effect Delim { ui(HtmlKind, HtmlAttr), keeping, rt, div }
+
+pub fn current_tree(): Tree(HtmlKind, HtmlAttr) ! {ui(HtmlKind, HtmlAttr)} { perform ui() }
+
+// `body` on the tree `t`, at the root: what it keeps runs later with the contexts and the tree
+// that stood where it was kept.
+pub fn with_ui<A>(
+  t: Tree(HtmlKind, HtmlAttr),
+  vocabulary: Vocab(HtmlKind, HtmlAttr),
+  body: () -> A ! {Delim}
+): A ! {rt, div} {
+  match rooted(() => with_tree(t, body)) {
+    Some(a) => a
+    // The build itself returns through `rooted`; only a kept part run later ends otherwise.
+    None => with_ui(t, vocabulary, body)
+  }
+}
+
+// The handler `h` of an event, kept so that it runs with what stood where it was made.
+pub fn on_event<P: Type, !r>(
+  kind: EventKind,
+  h: (d: EventData) -> Unit ! {rt, div} ∪ r
+): Prop(P) ! {ui(HtmlKind, HtmlAttr), keeping, rt, div} ∪ r {
+  let t := current_tree()
+  let run := keep_run(() => h(current_event(t)))
+  Held(kind, hold(run))
+}
+
+// `b` as a part the tree runs again (a dynamic attribute, the condition of an `@if`).
+pub fn lifted_part<A: Shared + NoBorrow, !r>(
+  b: () -> A ! {rt, div} ∪ r
+): (() -> A ! {rt, div}) ! {keeping, rt, div} ∪ r {
+  keep_value(b)
+}
+
+// `build` on the tree `ui` gives: what `view!` without a tree expands to.
+pub fn view_in<!r>(
+  build: (t: Tree(HtmlKind, HtmlAttr)) -> Node ! {rt, div} ∪ r
+): Node ! {ui(HtmlKind, HtmlAttr), rt, div} ∪ r {
+  build(current_tree())
+}
+// What `${…}` may give an attribute: a text, or a `Bool`, written `"true"` or `"false"` (as
+// `aria-pressed` reads it).
+pub class AttrText(A: Shared) {
+  fn attr_text(a: A): Text
+}
+instance AttrText(Text) {
+  fn attr_text(a: Text): Text { a }
+}
+instance AttrText(Bool) {
+  fn attr_text(a: Bool): Text { if a { "true" } else { "false" } }
+}
+pub class ViewValue(A: Shared) {
+  fn render(
+    t: Tree(HtmlKind, HtmlAttr),
+    build: () -> A ! {rt, div, overflow}
+  ): Node ! {rt, div, overflow}
+}
+instance ViewValue(Text) {
+  fn render(
+    t: Tree(HtmlKind, HtmlAttr),
+    build: () -> Text ! {rt, div, overflow}
+  ): Node ! {rt, div, overflow} {
+    text_dyn(t, build)
+  }
+}
+instance ViewValue(Node) {
+  fn render(
+    t: Tree(HtmlKind, HtmlAttr),
+    build: () -> Node ! {rt, div, overflow}
+  ): Node ! {rt, div, overflow} { build() }
+}
+// `${…}` of `view!` given a tree: what it builds is a view of its own, rooted there.
+pub fn view_value_in<A: Shared + NoBorrow>(
+  t: Tree(HtmlKind, HtmlAttr),
+  build: () -> A ! {Delim}
+): Node ! {rt, div} where ViewValue(A) {
+  ViewValue::render(t, () => with_ui(t, web_vocab(), build))
+}
+// `${…}` of `view!` without a tree: kept, so it is built again with what stands here.
+pub fn view_value<A: Shared + NoBorrow, !r>(
+  build: () -> A ! {rt, div} ∪ r
+): Node ! {Delim} ∪ r where ViewValue(A) {
+  ViewValue::render(current_tree(), keep_value(build))
+}
+
+// ---- the forms of the view that take the tree from `ui` ---------------------------------------
+
+// `body()` with the context `value`: the components in `body` read it with `use_context()`,
+// and so do the handlers and the `${…}` they keep, when they run later.
+pub fn provide<A: Shared + NoBorrow, T, !f>(value: A, body: () -> T ! {context(A)} ∪ f): T ! f {
+  with_context(value, body)
+}
+
+// Where a `suspense` below an `error_boundary` reports a failure that happens when it builds its
+// body again, after the `error_boundary` has returned: the boundary shows `failed(why)` for it.
+pub struct(shared) Failure(E: Type) { cell: Signal(Option(E)) }
+
+// `body()`, or `failed(why)` if `body` fails with `fail(why)`: before it returns, or later, when a
+// `suspense` in it builds its body again and that fails. A `suspense` needs one above it.
+pub fn error_boundary<E: Shared + NoBorrow, !e>(
+  b: {
+    failed: (why: E) -> Node ! {Delim} ∪ e,
+    body: () -> Node ! {Delim, context(Failure(E)), fail(E)} ∪ e
+  }
+): Node ! {Delim} ∪ e {
+  let t := current_tree()
+  let failure: Signal(Option(E)) := signal(None)
+  let build := keep((f: Option(E)) => match f {
+    Some(why) => (b.failed)(why)
+    None => match provide(Failure { cell: failure }, () => handle { Ok((b.body)()) } with {
+      fail<E>(why) => Err(why)
+      return n => n
+    }) {
+      Ok(n) => n
+      Err(why) => (b.failed)(why)
+    }
+  })
+  switch_on_change(t, () => get(failure), build)
+}
+
+// `body()` once every resource it reads is settled. While one is pending, `pending()` is shown
+// in its place, and `body` is built again when that resource settles; a cancelled one shows
+// `cancelled()`. The boundary owns only what it shows: waiting here never cancels a resource.
+// A failure of `body` goes to the `error_boundary` above, which shows its `failed`.
+enum Tried { Shown(Node), Waiting, Stopped }
+
+pub fn suspense<A: Shared + NoBorrow, E: Shared + NoBorrow, !e>(
+  s: {
+    pending: () -> Node ! {Delim} ∪ e,
+    cancelled: () -> Node ! {Delim} ∪ e,
+    body: () -> Node ! {Delim, resource_wait(A, E), resource_cancelled, fail(E)} ∪ e
+  }
+): Node ! {Delim, context(Failure(E))} ∪ e {
+  let t := current_tree()
+  let reported: Failure(E) := use_context()
+  let attempt := signal(0)
+  let build := keep((n: u64) => {
+    // The arms only note what happened: what is shown instead is built after the `handle`,
+    // where no continuation of `body` is held while it keeps parts of its own.
+    let tried := handle { Shown((s.body)()) } with {
+      resource_wait<A, E>(resource), k => {
+        watch(() => match state(resource) {
+          Pending => #()
+          Ready(_) => set(attempt, n + 1)
+          Failed(_) => set(attempt, n + 1)
+          Cancelled => set(attempt, n + 1)
+        })
+        Waiting
+      }
+      resource_cancelled() => Stopped
+      fail<E>(why) => {
+        set(reported.cell, Some(why))
+        // The `error_boundary` builds again and drops this; nothing is shown meanwhile.
+        let g := node_of(t)
+        emit(t, CreateGroup(g))
+        Shown(g)
+      }
+      return shown => shown
+    }
+    match tried {
+      Shown(node) => node
+      Waiting => (s.pending)()
+      Stopped => (s.cancelled)()
+    }
+  })
+  switch_on(t, () => get(attempt), build)
+}
+
+// `0, 1, …, n - 1`.
+pub fn nat_range(n: Nat): List(Nat) ! {div, overflow} { nat_range_from(0, n) }
+fn nat_range_from(i: Nat, n: Nat): List(Nat) ! {div, overflow} {
+  if i < n { Cons(i, nat_range_from(i + 1, n)) } else { Nil }
+}

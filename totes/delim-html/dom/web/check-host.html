@@ -1,0 +1,240 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Delim DOM host regressions</title>
+<pre id="result">running</pre>
+<script type="module">
+try {
+      const h = await import('/dom.mjs');
+      const app = document.querySelector('#app');
+      const results = [];
+      const check = (name, condition) => {
+        if (!condition) throw new Error(name);
+        results.push(name);
+      };
+      let d = h.root('#app');
+      h.create(d, 1, 'input'); h.mount(d, 1);
+      h.attr(d, 1, 'type', 'checkbox');
+      h.boolean(d, 1, 'checked', true);
+      const input = app.firstChild;
+      input.click(); // Simulate user interaction: the checked attribute cannot control this.
+      check('user toggles checkbox', !input.checked);
+      h.boolean(d, 1, 'checked', true);
+      check('controlled checkbox follows property after interaction', input.checked);
+      h.boolean(d, 1, 'checked', false);
+      check('controlled checkbox clears', !input.checked);
+      for (const [property, attr] of [['hidden', 'hidden'], ['required', 'required'], ['readOnly', 'readonly']]) {
+        h.boolean(d, 1, property, true);
+        check(`${property} set`, input[property] && input.hasAttribute(attr));
+        h.boolean(d, 1, property, false);
+        check(`${property} cleared`, !input[property] && !input.hasAttribute(attr));
+      }
+      h.attr(d, 1, 'aria-label', 'label'); h.removeAttr(d, 1, 'aria-label');
+      check('optional attribute removes', !input.hasAttribute('aria-label'));
+      h.create(d, 2, 'select'); h.create(d, 3, 'option'); h.create(d, 4, 'option');
+      h.value(d, 3, 'a'); h.value(d, 4, 'b');
+      h.append(d, 2, 3); h.append(d, 2, 4); h.mount(d, 2);
+      const select = app.firstChild;
+      h.boolean(d, 4, 'selected', true);
+      check('selected changes the live selection', select.value === 'b');
+      h.boolean(d, 4, 'selected', false);
+      check('selected can clear an option', !select.lastChild.selected);
+      h.boolean(d, 2, 'multiple', true);
+      check('multiple set', select.multiple && select.hasAttribute('multiple'));
+      h.boolean(d, 2, 'multiple', false);
+      check('multiple cleared', !select.multiple && !select.hasAttribute('multiple'));
+      h.release(d); h.release(d);
+
+      app.innerHTML = '<div data-b="1"><!--2-->hello<delim-island data-b="3"><p data-b="1"><!--2-->nested</p></delim-island></div>';
+      const original = app.firstChild;
+      d = h.hydrateRoot('#app');
+      h.create(d, 1, 'div'); h.text(d, 2, 'hello');
+      h.island(d, 3, 'nested', '', '');
+      h.append(d, 1, 2); h.append(d, 1, 3); h.mount(d, 1); h.settle(d);
+      check('matching hydration keeps DOM and ignores nested numbering', original === app.firstChild);
+      h.release(d);
+
+      app.innerHTML = '<p data-b="1"><!--2--></p>';
+      d = h.hydrateRoot('#app');
+      h.create(d, 1, 'p'); h.text(d, 2, ''); h.append(d, 1, 2); h.mount(d, 1); h.settle(d);
+      check('empty marked text hydrates', app.firstChild.childNodes.length === 2);
+      h.release(d);
+
+      const mismatch = (name, html, run) => {
+        app.innerHTML = html;
+        let doc;
+        try { doc = h.hydrateRoot('#app'); run(doc); }
+        catch (e) { check(name, e instanceof h.HydrationError); return; }
+        finally { if (doc) h.release(doc); }
+        throw new Error(`did not reject ${name}`);
+      };
+      mismatch('tag mismatch', '<p data-b="1"></p>', d => h.create(d, 1, 'button'));
+      mismatch('text mismatch', '<!--1-->server', d => h.text(d, 1, 'client'));
+      mismatch('node kind mismatch', '<p data-b="1"></p>', d => h.text(d, 1, 'client'));
+      mismatch('duplicate numbers', '<p data-b="1"></p><p data-b="1"></p>', () => {});
+      mismatch('unused server node', '<p data-b="1"></p>', d => h.settle(d));
+      mismatch('parent mismatch', '<div data-b="1"></div><p data-b="2"></p>', d => {
+        h.create(d, 1, 'div'); h.create(d, 2, 'p'); h.append(d, 1, 2);
+      });
+      mismatch('missing child', '<p data-b="1"></p>', d => {
+        h.create(d, 1, 'p'); h.text(d, 2, 'client'); h.append(d, 1, 2);
+      });
+      mismatch('sibling order', '<div data-b="1"><b data-b="3"></b><b data-b="2"></b></div>', d => {
+        h.create(d, 1, 'div'); h.create(d, 2, 'b'); h.create(d, 3, 'b');
+        h.append(d, 1, 2); h.append(d, 1, 3); h.mount(d, 1); h.settle(d);
+      });
+      mismatch('missing island root', '', d => { h.create(d, 1, 'p'); h.mount(d, 1); });
+      const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+      // Takes the root's events as the program does: one `next` after another till the closed one.
+      const listen = (d, f) => { (async () => {
+        for (;;) { const e = await h.next(d); if (!e.open) return; f(e.node, e.code, e.text, e.x, e.y, e.button); }
+      })(); };
+      let finish, aborted = false, delivered = 0;
+      h.setLoader((key, { signal }) => new Promise(resolve => {
+        finish = resolve;
+        signal.addEventListener('abort', () => { aborted = true; });
+      }));
+      d = h.root('#app');
+      const pending = h.load(d, 'pending').then(r => { if (r.ok) delivered++; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      h.release(d);
+      finish({ ok: true, text: 'late' });
+      await pending;
+      check('release aborts loader I/O', aborted);
+      check('release makes a late load a failure', delivered === 0);
+      check('released root starts no new loads', (await h.load(d, 'after release')).ok === false);
+
+      h.setLoader(async () => ({ ok: true, text: 'loaded' }));
+      d = h.root('#app');
+      const loaded = await h.load(d, 'k');
+      check('a load gives what the loader gave', loaded.ok === true && loaded.text === 'loaded');
+      h.setLoader(async () => { throw new Error('loader failed'); });
+      const failed = await h.load(d, 'k');
+      check('a loader that throws is a failed load', failed.ok === false && /loader failed/.test(failed.text));
+      h.setLoader(async () => ({ ok: true, text: 'loaded' }));
+      h.release(d);
+
+      // A loader set for an element serves the roots under it; others keep the page's loader.
+      app.innerHTML = '<section id="one"><div id="inner"></div></section><section id="two"></section>';
+      h.setLoader(async (key) => ({ ok: true, text: `one:${key}` }), '#one');
+      const got = [];
+      for (const s of ['#inner', '#two']) {
+        const r = h.root(s);
+        got.push((await h.load(r, 'k')).text);
+        h.release(r);
+      }
+      check('a scoped loader serves roots under its element', got[0] === 'one:k');
+      check('other roots keep the page loader', got[1] === 'loaded');
+      h.setLoader(null, '#one');
+      const r1 = h.root('#inner'); got.length = 0;
+      got.push((await h.load(r1, 'k')).text);
+      h.release(r1);
+      check('a removed scoped loader falls back to the page loader', got[0] === 'loaded');
+
+      // unmount ends what was mounted on an element and clears it.
+      app.replaceChildren();
+      d = h.root('#app');
+      let calls = 0;
+      listen(d, () => { calls++; });
+      h.create(d, 1, 'button'); h.mount(d, 1);
+      const slept = h.sleep(d, 0n).then(alive => { if (alive) calls++; });
+      const button = app.firstChild;
+      check('unmount reports a mounted app', h.unmount('#app') === true);
+      button.click();
+      await slept; await tick();
+      check('unmount clears the element and stops events and timers', app.childNodes.length === 0 && calls === 0);
+      check('a released root has no more events', (await h.next(d)).open === false);
+      check('unmount of nothing mounted is false', h.unmount('#app') === false && h.unmount(app) === false);
+      h.release(d);
+
+      // SVG, custom properties, parents, and drags.
+      app.replaceChildren();
+      d = h.root('#app');
+      h.create(d, 1, 'div'); h.svg(d, 2, 'svg'); h.svg(d, 3, 'path');
+      h.attr(d, 3, 'd', 'M0 0 L10 10'); h.attr(d, 2, 'viewBox', '0 0 10 10');
+      h.append(d, 2, 3); h.append(d, 1, 2); h.mount(d, 1);
+      const path = app.querySelector('path');
+      check('svg elements are in the SVG namespace', path instanceof SVGPathElement && path.namespaceURI === 'http://www.w3.org/2000/svg');
+      check('svg attributes keep their case', app.querySelector('svg').getAttribute('viewBox') === '0 0 10 10');
+      h.styleVar(d, 1, '--x', '12px');
+      check('a custom property is set', app.firstChild.style.getPropertyValue('--x') === '12px');
+      h.styleVar(d, 1, '--x', '');
+      check('an empty value removes a custom property', app.firstChild.style.getPropertyValue('--x') === '' && app.firstChild.getAttribute('style') === '');
+      check('parent is the nearest numbered node above', h.parent(d, 3) === 2n && h.parent(d, 2) === 1n && h.parent(d, 1) === 0n);
+      let dead = false;
+      h.remove(d, 1);
+      try { h.append(d, 1, 3); } catch (e) { dead = /node 1 is not alive/.test(e.message); }
+      check('a removed node is named when a patch uses it', dead);
+      h.release(d);
+
+      app.replaceChildren();
+      d = h.root('#app');
+      const seen = [];
+      listen(d, (n, code, s, x, y, b) => seen.push(`${n}:${code}:${x},${y}`));
+      h.create(d, 1, 'div'); h.create(d, 2, 'div'); h.create(d, 3, 'span'); h.create(d, 4, 'div');
+      h.attr(d, 2, 'style', 'position:fixed;left:0;top:0;width:40px;height:40px');
+      h.attr(d, 4, 'style', 'position:fixed;left:100px;top:0;width:40px;height:40px');
+      h.append(d, 2, 3); h.append(d, 1, 2); h.append(d, 1, 4); h.mount(d, 1);
+      h.drag(d, 2, true);
+      const pointer = (target, type, x, y) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, button: 0, clientX: x, clientY: y, isPrimary: true }));
+      const inner = app.querySelector('span'), drop = app.firstChild.lastChild;
+      pointer(inner, 'pointerdown', 10, 10);
+      pointer(inner, 'pointermove', 11, 11);
+      await tick();
+      check('a move inside the slop is not a drag', !seen.some(x => /:1[3-6]n?:/.test(x)));
+      pointer(inner, 'pointermove', 60, 12);
+      pointer(inner, 'pointerup', 120, 20);
+      await tick();
+      const drags = seen.filter(x => /:1[3-6]:/.test(x));
+      await tick();
+      check('a drag starts at the press, moves, drops on the node under the pointer and ends',
+        drags.join(' ') === '2:13:10,10 2:14:60,12 4:16:120,20 2:15:120,20');
+      seen.length = 0;
+      inner.click();
+      await tick();
+      check('the click that ends a drag is not a press', !seen.some(x => /:0:/.test(x)));
+      inner.click();
+      await tick();
+      check('a later click is a press', seen.some(x => x.startsWith('3:0:')));
+      seen.length = 0;
+      pointer(inner, 'pointerdown', 10, 10);
+      pointer(inner, 'pointerup', 10, 10);
+      await tick();
+      check('a press that does not move is not a drag', !seen.some(x => /:1[3-6]:/.test(x)));
+      h.drag(d, 2, false);
+      seen.length = 0;
+      pointer(inner, 'pointerdown', 10, 10);
+      pointer(inner, 'pointermove', 60, 12);
+      await tick();
+      check('an element that is no longer a drag source does not drag', !seen.some(x => /:1[3-6]:/.test(x)));
+      h.release(d);
+
+      // A reorder keeps the focus and the text selection of the node it moves.
+      app.replaceChildren();
+      d = h.root('#app');
+      h.create(d, 1, 'div'); h.create(d, 2, 'p'); h.create(d, 3, 'p'); h.create(d, 4, 'input');
+      h.append(d, 3, 4); h.append(d, 1, 2); h.append(d, 1, 3); h.mount(d, 1);
+      const field = app.querySelector('input');
+      field.value = 'hello'; field.focus(); field.setSelectionRange(1, 3);
+      h.insertBefore(d, 1, 3, 2);
+      check('a moved node comes first', app.firstChild.firstChild === field.parentNode);
+      check('a moved input keeps the focus', document.activeElement === field);
+      check('a moved input keeps its selection', field.selectionStart === 1 && field.selectionEnd === 3);
+      h.append(d, 1, 3);
+      check('a node moved to the end keeps the focus', document.activeElement === field && app.firstChild.lastChild === field.parentNode);
+      const fallback = Element.prototype.moveBefore;
+      Element.prototype.moveBefore = undefined;
+      try {
+        h.insertBefore(d, 1, 3, 2);
+        check('without moveBefore the focus is written back', document.activeElement === field);
+        check('without moveBefore the selection is written back', field.selectionStart === 1 && field.selectionEnd === 3);
+      } finally { Element.prototype.moveBefore = fallback; }
+      field.blur();
+      h.release(d);
+      document.querySelector('#result').textContent = `${results.length} DOM host checks passed`;
+      document.documentElement.dataset.result = 'passed';
+} catch (error) {
+  document.querySelector('#result').textContent = error.stack;
+  document.documentElement.dataset.result = 'failed';
+}
+</script>
+<div id="app"></div>

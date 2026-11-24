@@ -1,0 +1,4 @@
+// A failed check fails the test that runs it, named by `name`.
+pub fn check(name: Text, ok: Bool): Unit ! {fail(Text)} {
+  expect(ok, name)
+}

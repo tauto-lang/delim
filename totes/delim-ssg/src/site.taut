@@ -1,0 +1,364 @@
+import std::bytes { Bytes }
+import "../../delim/src/signal.taut" { cells, rt }
+import std::builtin::par { Ref, ref_get, ref_new, ref_set, wait }
+import "../../delim/src/common.taut" { Vocab }
+import "../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind, url_ok }
+import "../../delim/src/tree.taut" { Node, Tree }
+import std::builtin::os { fs_create_dir, fs_write, fs_write_bytes, io_message, write_file }
+import "../../delim-html/src/html.taut" { Escape, escape_text, render_html_loading }
+
+// Pages written ahead of time, to files.
+
+pub(open) struct(shared) Page {
+  title: Text,
+  // The language of the document, as `<html lang>`; empty for none.
+  lang: Text,
+  // What goes in `<head>` after the title.
+  head: List(Head),
+  view: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div}
+}
+
+// An element of `<head>`. Values are escaped, and a URL delim's `url_ok` refuses is left out.
+// A stylesheet and a script are code the page runs: they are not made from a user's value.
+pub(open) enum Head {
+  // `<link rel="stylesheet" href>`.
+  Stylesheet(Text)
+  // `<link rel="icon" href type sizes>`.
+  Icon(Text, Text, Text)
+  // `<meta name content>`.
+  Meta(Text, Text)
+  // `<script type="module" src>`.
+  Script(Text)
+  // `<meta property content>`, as Open Graph uses (`og:title`).
+  Property(Text, Text)
+  // `<link rel href>` for a relation that loads nothing, such as `canonical`.
+  Related(Text, Text)
+  // `<link rel="alternate" hreflang href>`: the same page in another language.
+  Alternate(Text, Text)
+  // `<script src>`, run before the page is drawn, for what must apply before the first paint.
+  BlockingScript(Text)
+}
+
+// How `generate` names the file of a page other than `/`.
+pub(open) enum Layout {
+  // `<path>.html`.
+  Flat
+  // `<path>/index.html`, which a static host serves at `<path>/`.
+  Directories
+}
+
+fn quoted(name: Text, value: Text): Text ! {overflow, div} {
+  concat(concat(concat(" ", name), concat("=\"", Escape::attr(value))), "\"")
+}
+
+fn head_element(h: Head): Text ! {overflow, div} {
+  match h {
+    Stylesheet(href) => if url_ok(href) {
+      concat(concat("<link rel=\"stylesheet\"", quoted("href", href)), ">")
+    } else { "" }
+    Icon(href, mime, sizes) => if url_ok(href) {
+      concat(
+        concat(
+          concat(concat("<link rel=\"icon\"", quoted("href", href)), quoted("type", mime)),
+          quoted("sizes", sizes)
+        ),
+        ">"
+      )
+    } else { "" }
+    Meta(name, content) => concat(
+      concat(concat("<meta", quoted("name", name)), quoted("content", content)),
+      ">"
+    )
+    Script(src) => if url_ok(src) {
+      concat(concat("<script type=\"module\"", quoted("src", src)), "></script>")
+    } else { "" }
+    Property(property, content) => concat(
+      concat(concat("<meta", quoted("property", property)), quoted("content", content)),
+      ">"
+    )
+    Related(rel, href) => if url_ok(href) && link_rel_ok(rel) {
+      concat(concat(concat("<link", quoted("rel", rel)), quoted("href", href)), ">")
+    } else { "" }
+    Alternate(lang, href) => if url_ok(href) {
+      concat(
+        concat(concat("<link rel=\"alternate\"", quoted("hreflang", lang)), quoted("href", href)),
+        ">"
+      )
+    } else { "" }
+    BlockingScript(src) => if url_ok(src) {
+      concat(concat("<script", quoted("src", src)), "></script>")
+    } else { "" }
+  }
+}
+
+// The relations `Related` writes: ones that load no code or style into the page.
+fn link_rel_ok(rel: Text): Bool {
+  rel == "canonical" || rel == "author" || rel == "license" || rel == "help" || rel == "me"
+}
+
+fn head_elements(l: List(Head)): Text ! {overflow, div} {
+  match l {
+    Nil => ""
+    Cons(h, rest) => concat(head_element(h), head_elements(rest))
+  }
+}
+
+// The document up to the view: the head, and `<div id="app">`, which the DOM renderer mounts on.
+pub fn document_open(p: Page): Text ! {overflow, div} {
+  let open := if p.lang == "" { "<html>" } else {
+    concat(concat("<html", quoted("lang", p.lang)), ">")
+  }
+  concat(
+    concat(
+      concat(concat("<!doctype html>\n", open), "<head><meta charset=\"utf-8\"><title>"),
+      escape_text(p.title)
+    ),
+    concat(concat("</title>", head_elements(p.head)), "</head><body><div id=\"app\">")
+  )
+}
+
+// The whole document of a page: the rendered view in `<div id="app">`, with the resources it
+// asks for loaded by `load`. A resource that fails to load fails the page, with the first
+// reason, so that no file is written with a part missing.
+pub fn document<!e>(
+  p: Page,
+  load: (key: Text) -> Result(Text, Text) ! {overflow, div} ∪ e
+): Result(Text, Text) ! {overflow, wait, div, cells, ref_new, ref_get, ref_set} ∪ e {
+  let failed: Ref(Option(Text)) := perform ref_new(None)
+  let noted := (key: Text) => match load(key) {
+    Ok(v) => Ok(v)
+    Err(why) => {
+      match perform ref_get(failed) {
+        None => perform ref_set(failed, Some(concat(concat(key, ": "), why))),
+        Some(w) => #()
+      }
+      Err(why)
+    }
+  }
+  let body := render_html_loading(p.view, noted)
+  match perform ref_get(failed) {
+    Some(why) => Err(why)
+    None => Ok(concat(document_open(p), concat(body, "</div></body></html>\n")))
+  }
+}
+
+// Whether `path` may name a file under the output: it starts with `/`, and no segment is
+// empty, `.` or `..`.
+pub fn file_path_ok(path: Text): Bool ! {overflow, div} {
+  match Text::byte(path, 0) {
+    Some(b) => U64::of_u8(b) == 47 && segments_ok(path, 1, 1)
+    None => false
+  }
+}
+
+fn segments_ok(t: Text, begin: u64, i: u64): Bool ! {overflow, div} {
+  match Text::byte(t, i) {
+    None => segment_ok(t, begin, i)
+    Some(b) => if U64::of_u8(b) == 47 {
+      segment_ok(t, begin, i) && segments_ok(t, i + 1, i + 1)
+    } else { segments_ok(t, begin, i + 1) }
+  }
+}
+
+fn segment_ok(t: Text, begin: u64, to: u64): Bool ! {div} {
+  match Text::slice(t, begin, to) {
+    None => false
+    Some(s) => not(s == "" || s == "." || s == "..")
+  }
+}
+
+// The directory part of `path`, up to its last `/`.
+pub fn parent_dir(path: Text): Text ! {overflow, div} { parent_until(path, 0, 0) }
+
+fn parent_until(t: Text, i: u64, last: u64): Text ! {overflow, div} {
+  match Text::byte(t, i) {
+    None => match Text::slice(t, 0, last) {
+      Some(d) => d
+      None => ""
+    }
+    Some(b) => parent_until(t, i + 1, if U64::of_u8(b) == 47 { i } else { last })
+  }
+}
+
+// Writes `contents` to `dir` + `file`, making the directories it is in.
+pub fn write_under(
+  dir: Text,
+  file: Text,
+  contents: Text
+): Result(Unit, Text) ! {overflow, fs_write, fs_create_dir, div} {
+  if not(file_path_ok(file)) { Err(concat("not a path under the output: ", file)) } else {
+    let full := concat(dir, file)
+    match perform fs_create_dir(parent_dir(full)) {
+      Err(e) => Err(io_message(e))
+      Ok(u) => write_file(full, contents)
+    }
+  }
+}
+
+// `write_under` for bytes, as an image, a font or a `.wasm` is.
+pub fn write_bytes_under(
+  dir: Text,
+  file: Text,
+  contents: Bytes
+): Result(Unit, Text) ! {overflow, fs_write_bytes, fs_create_dir, div} {
+  if not(file_path_ok(file)) { Err(concat("not a path under the output: ", file)) } else {
+    let full := concat(dir, file)
+    match perform fs_create_dir(parent_dir(full)) {
+      Err(e) => Err(io_message(e))
+      Ok(u) => match perform fs_write_bytes(full, contents) {
+        Err(e) => Err(io_message(e))
+        Ok(v) => Ok(#())
+      }
+    }
+  }
+}
+
+// The file a page at `path` is written to.
+pub fn page_file(layout: Layout, path: Text): Text ! {div} {
+  if path == "/" { "/index.html" } else {
+    match layout {
+      Flat => concat(path, ".html")
+      Directories => concat(path, "/index.html")
+    }
+  }
+}
+
+// `generate`, also writing `missing` as `/404.html`, the page static hosts answer a path they
+// have no file for with.
+pub fn generate_missing<!e>(
+  dir: Text,
+  layout: Layout,
+  pages: List(Text × Page),
+  missing: Option(Page),
+  load: (key: Text) -> Result(Text, Text) ! {overflow, div} ∪ e,
+  assets: List(@path Text × @body Bytes)
+): Result(Unit, Text) ! {
+  overflow,
+  wait,
+  fs_write,
+  fs_write_bytes,
+  fs_create_dir,
+  div,
+  cells,
+  ref_new,
+  ref_get,
+  ref_set
+} ∪ e {
+  match missing {
+    None => generate(dir, layout, pages, load, assets)
+    Some(p) => match document(p, load) {
+      Err(why) => Err(concat("/404.html: ", why))
+      Ok(d) => match write_under(dir, "/404.html", d) {
+        Err(why) => Err(why)
+        Ok(u) => generate(dir, layout, pages, load, assets)
+      }
+    }
+  }
+}
+
+// The first path that two of `pages` share, or that is not a path a file can be written at.
+pub fn bad_path(pages: List(Text × Page)): Option(Text) ! {overflow, div} {
+  match pages {
+    Nil => None
+    Cons(#(path, p), rest) => if path != "/" && not(file_path_ok(path)) {
+      Some(concat(path, ": not a path a page can be written at"))
+    } else if has_path(rest, path) {
+      Some(concat(path, ": two pages have this path"))
+    } else { bad_path(rest) }
+  }
+}
+
+fn has_path(pages: List(Text × Page), path: Text): Bool {
+  match pages {
+    Nil => false
+    Cons(#(q, p), rest) => q == path || has_path(rest, path)
+  }
+}
+
+// Writes each of `pages` to `dir`, as `index.html` for `/` and by `layout` otherwise, and then
+// each of `assets` at its path. Nothing is written when two pages share a path or a path is
+// not one a file can be written at.
+pub fn generate<!e>(
+  dir: Text,
+  layout: Layout,
+  pages: List(Text × Page),
+  load: (key: Text) -> Result(Text, Text) ! {overflow, div} ∪ e,
+  assets: List(@path Text × @body Bytes)
+): Result(Unit, Text) ! {
+  overflow,
+  wait,
+  fs_write,
+  fs_write_bytes,
+  fs_create_dir,
+  div,
+  cells,
+  ref_new,
+  ref_get,
+  ref_set
+} ∪ e {
+  match bad_path(pages) {
+    Some(why) => Err(why)
+    None => write_pages(dir, layout, pages, load, assets)
+  }
+}
+
+fn write_pages<!e>(
+  dir: Text,
+  layout: Layout,
+  pages: List(Text × Page),
+  load: (key: Text) -> Result(Text, Text) ! {overflow, div} ∪ e,
+  assets: List(@path Text × @body Bytes)
+): Result(Unit, Text) ! {
+  overflow,
+  wait,
+  fs_write,
+  fs_write_bytes,
+  fs_create_dir,
+  div,
+  cells,
+  ref_new,
+  ref_get,
+  ref_set
+} ∪ e {
+  match pages {
+    Nil => write_assets(dir, assets)
+    Cons(#(path, p), rest) => match document(p, load) {
+      Err(why) => Err(concat(concat(path, ": "), why))
+      Ok(d) => match write_under(dir, page_file(layout, path), d) {
+        Err(why) => Err(why)
+        Ok(u) => write_pages(dir, layout, rest, load, assets)
+      }
+    }
+  }
+}
+
+fn write_assets(
+  dir: Text,
+  assets: List(@path Text × @body Bytes)
+): Result(Unit, Text) ! {overflow, fs_write_bytes, fs_create_dir, div} {
+  match assets {
+    Nil => Ok(#())
+    Cons(#(@path p, @body b), rest) => match write_bytes_under(dir, p, b) {
+      Err(why) => Err(why)
+      Ok(u) => write_assets(dir, rest)
+    }
+  }
+}
+
+// An asset of text, as a stylesheet or a script is.
+pub fn text_asset(path: Text, body: Text): @path Text × @body Bytes {
+  #(@path path, @body Bytes::of_text(body))
+}
+
+// The path of a request target, without its query.
+pub fn path_of(target: Text): Text ! {overflow, div} { path_until(target, 0) }
+
+fn path_until(t: Text, i: u64): Text ! {overflow, div} {
+  match Text::byte(t, i) {
+    None => t
+    Some(b) => if U64::of_u8(b) == 63 { match Text::slice(t, 0, i) {
+        Some(p) => p
+        None => t
+      } } else { path_until(t, i + 1) }
+  }
+}

@@ -1,0 +1,568 @@
+import std::builtin::macro {
+  Syn,
+  SynBinder,
+  SynCtx,
+  SynExpr,
+  SynIdent,
+  SynSpan,
+  SynToken,
+  macro_error
+}
+import delim::tree { Prop, Tree }
+import "markup.taut" { Attr, HtmlAttr, HtmlKind, starts_with, tag_refusal, url_refusal }
+import "ui.taut" { AttrText, lifted_part, on_event, view_in, view_value, view_value_in }
+import delim::signal { memo, readonly }
+import delim::view { View, ViewDialect, view }
+
+// `view!` of the web elements: the dialect of `delim::view` for HTML. A tag is one of the
+// elements `policy.taut` lists (or a custom element with a dash in its name), an attribute one of
+// its attributes, `data-*` or `aria-*`; what the renderers would refuse is an error of the program.
+//
+//   view!(
+//     ```view
+//     $t <div class="row"><p>"Count: " $text_dyn(t, () => decimal(get(n)))</p>
+//       <button aria-label="Add" on:press=${(d: EventData) => update(n, (x: u64) => x + 1)}>"+"</button>
+//     </div>
+//     ```
+//   )
+//
+// The expression first is the tree. An attribute is a quoted text, fixed, or `${e}` with `e` a
+// text, followed; `on:press` and the other event names take a handler of the event's data. A
+// child is an element, a quoted text, or `$e` with `e` a node.
+
+pub fn view_url_attr_names(): List(Text) {
+  ["action", "cite", "formaction", "href", "poster", "src"]
+}
+
+fn text_in(t: Text, l: List(Text)): Bool ! {div, overflow} {
+  match l {
+    Nil => false
+    Cons(x, rest) => x == t || text_in(t, rest)
+  }
+}
+
+fn has_dash(t: Text, i: u64): Bool ! {div, overflow} {
+  match Text::byte(t, i) {
+    None => false
+    Some(b) => U64::of_u8(b) == 45 || has_dash(t, i + 1)
+  }
+}
+
+pub module HtmlView {
+  pub fn tag_names(): List(Text) {
+    [
+      "a",
+      "abbr",
+      "address",
+      "article",
+      "aside",
+      "audio",
+      "b",
+      "bdi",
+      "bdo",
+      "blockquote",
+      "br",
+      "button",
+      "canvas",
+      "caption",
+      "cite",
+      "code",
+      "col",
+      "colgroup",
+      "data",
+      "datalist",
+      "dd",
+      "del",
+      "details",
+      "dfn",
+      "dialog",
+      "div",
+      "dl",
+      "dt",
+      "em",
+      "fieldset",
+      "figcaption",
+      "figure",
+      "footer",
+      "form",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "header",
+      "hgroup",
+      "hr",
+      "i",
+      "img",
+      "input",
+      "ins",
+      "kbd",
+      "label",
+      "legend",
+      "li",
+      "main",
+      "mark",
+      "menu",
+      "meter",
+      "nav",
+      "ol",
+      "optgroup",
+      "option",
+      "output",
+      "p",
+      "picture",
+      "pre",
+      "progress",
+      "q",
+      "rp",
+      "rt",
+      "ruby",
+      "s",
+      "samp",
+      "search",
+      "section",
+      "select",
+      "small",
+      "source",
+      "span",
+      "strong",
+      "sub",
+      "summary",
+      "sup",
+      "table",
+      "tbody",
+      "td",
+      "textarea",
+      "tfoot",
+      "th",
+      "thead",
+      "time",
+      "tr",
+      "track",
+      "u",
+      "ul",
+      "var",
+      "video",
+      "wbr"
+    ]
+  }
+
+  pub fn attr_names(): List(Text) {
+    [
+      "abbr",
+      "accept",
+      "accesskey",
+      "action",
+      "alt",
+      "autocapitalize",
+      "autocomplete",
+      "autofocus",
+      "autoplay",
+      "checked",
+      "cite",
+      "class",
+      "cols",
+      "colspan",
+      "contenteditable",
+      "controls",
+      "coords",
+      "crossorigin",
+      "datetime",
+      "decoding",
+      "default",
+      "dir",
+      "dirname",
+      "disabled",
+      "download",
+      "draggable",
+      "enctype",
+      "enterkeyhint",
+      "for",
+      "form",
+      "formaction",
+      "formenctype",
+      "formmethod",
+      "formnovalidate",
+      "formtarget",
+      "headers",
+      "height",
+      "hidden",
+      "high",
+      "href",
+      "hreflang",
+      "id",
+      "inert",
+      "inputmode",
+      "kind",
+      "label",
+      "lang",
+      "list",
+      "loading",
+      "loop",
+      "low",
+      "max",
+      "maxlength",
+      "method",
+      "min",
+      "minlength",
+      "multiple",
+      "muted",
+      "name",
+      "novalidate",
+      "open",
+      "optimum",
+      "pattern",
+      "placeholder",
+      "playsinline",
+      "popover",
+      "popovertarget",
+      "popovertargetaction",
+      "poster",
+      "preload",
+      "readonly",
+      "rel",
+      "required",
+      "reversed",
+      "role",
+      "rows",
+      "rowspan",
+      "scope",
+      "selected",
+      "shape",
+      "size",
+      "sizes",
+      "span",
+      "spellcheck",
+      "src",
+      "srclang",
+      "srcset",
+      "start",
+      "step",
+      "tabindex",
+      "target",
+      "title",
+      "translate",
+      "type",
+      "value",
+      "width",
+      "wrap"
+    ]
+  }
+
+  pub fn scheme_names(): List(Text) { ["http", "https", "mailto", "tel"] }
+
+  fn byte_ok(c: u64, first: Bool): Bool {
+    (c >= 97 && c <= 122) || (not(first) && ((c >= 48 && c <= 57) || c == 45))
+  }
+
+  fn name_from(t: Text, i: u64): Bool ! {div, overflow} {
+    match Text::byte(t, i) {
+      None => i > 0
+      Some(b) => HtmlView::byte_ok(U64::of_u8(b), i == 0) && HtmlView::name_from(t, i + 1)
+    }
+  }
+
+  fn tag_refused(tag: Text): Option(Text) ! {div, overflow} {
+    if HtmlView::name_from(
+      tag,
+      0
+    ) && (text_in(tag, HtmlView::tag_names()) || has_dash(tag, 0)) { None } else {
+      Some(tag_refusal(tag))
+    }
+  }
+
+  fn attr_name_refused(name: Text): Option(Text) ! {div, overflow} {
+    if HtmlView::name_from(
+      name,
+      0
+    ) && (
+      text_in(
+        name,
+        HtmlView::attr_names()
+      ) || starts_with(name, "data-") || starts_with(name, "aria-")
+    ) { None } else { Some(Attr::refusal(name)) }
+  }
+
+  // The bytes of a URL before its first `/`, `?` or `#`, lowercased, without spaces and control
+  // bytes, as `url_head` in `policy.taut`.
+  fn url_head(t: Text, i: u64, acc: Text): Text ! {div, overflow} {
+    match Text::byte(t, i) {
+      None => acc
+      Some(b) => {
+        let c := U64::of_u8(b)
+        if c == 47 || c == 63 || c == 35 { acc } else if c <= 32 {
+          HtmlView::url_head(t, i + 1, acc)
+        } else {
+          let l := if c >= 65 && c <= 90 { c + 32 } else { c }
+          match Text::of_code_point(U32::of_u64(l)) {
+            Some(x) => HtmlView::url_head(t, i + 1, concat(acc, x))
+            // A byte of a longer character: it is not one of `&<>":`, so any stands for it.
+            None => HtmlView::url_head(t, i + 1, concat(acc, "~"))
+          }
+        }
+      }
+    }
+  }
+
+  fn find(t: Text, c: u64, i: u64): Option(u64) ! {div, overflow} {
+    match Text::byte(t, i) {
+      None => None
+      Some(b) => if U64::of_u8(b) == c { Some(i) } else { HtmlView::find(t, c, i + 1) }
+    }
+  }
+
+  pub fn url_ok(value: Text): Bool ! {div, overflow} {
+    let h := HtmlView::url_head(value, 0, "")
+    if HtmlView::find(
+      h,
+      38,
+      0
+    ) != None || HtmlView::find(
+      h,
+      60,
+      0
+    ) != None || HtmlView::find(h, 62, 0) != None || HtmlView::find(h, 34, 0) != None {
+      false
+    } else {
+      match HtmlView::find(h, 58, 0) {
+        None => true
+        Some(i) => match Text::slice(h, 0, i) {
+          Some(s) => text_in(s, HtmlView::scheme_names())
+          None => false
+        }
+      }
+    }
+  }
+
+  // Why the fixed `name="value"` may not be written, if it may not: what `Attr::refused` says,
+  // before the program runs.
+  fn attr_refused(name: Text, value: Text): Option(Text) ! {div, overflow} {
+    if name == "style" && value == "display:contents" { None } else {
+      match HtmlView::attr_name_refused(name) {
+        Some(why) => Some(why)
+        None => if text_in(name, view_url_attr_names()) && not(HtmlView::url_ok(value)) {
+          Some(url_refusal())
+        } else { None }
+      }
+    }
+  }
+
+  // Under `view!` without a tree, the handler is kept with `on_event`, so that what the
+  // `provide`s above handle is handled again when it runs.
+  fn handler(
+    u: Option(SynExpr),
+    kind: SynExpr,
+    h: SynExpr
+  ): SynExpr ! {macro_error, div, overflow} {
+    match u {
+      Some(v) => {
+        let f := View::handler_fn(h)
+        quote { on_event($kind, $f) }
+      }
+      None => View::handler(kind, h)
+    }
+  }
+
+  fn attr(u: Option(SynExpr), a: view::Attr): SynExpr ! {macro_error, div, overflow} {
+    let name := a.name.text
+    match Text::slice(name, 0, 3) {
+      Some(head) => if head == "on:" {
+        let kind := View::event(a.name.span, match Text::slice(name, 3, Text::len(name)) {
+          Some(e) => e
+          None => ""
+        })
+        match a.value {
+          Str(tok) => Syn::error(tok.span, "an event takes a handler, `${…}`")
+          TautoExpr(h) => HtmlView::handler(u, kind, h)
+        }
+      } else { HtmlView::plain_attr(u, a.name.span, name, a.value) }
+      None => HtmlView::plain_attr(u, a.name.span, name, a.value)
+    }
+  }
+
+  // The view of `t`, when `t` is the tree `view!` without a tree took from `ui`.
+  fn ui_of(t: SynExpr): Option(SynExpr) {
+    match t {
+      ExVar(n) => if n.name == "delim_view_tree" {
+        Some(ExVar(SynIdent { declaration: None, name: "delim_view_ui", ctx: n.ctx, span: n.span }))
+      } else { None }
+      _ => None
+    }
+  }
+
+  // A plain attribute: its name is checked here, and a fixed value too, so what the renderers
+  // would refuse is an error of the program instead.
+  fn plain_attr(
+    u: Option(SynExpr),
+    at: SynSpan,
+    name: Text,
+    v: view::Value
+  ): SynExpr ! {macro_error, div, overflow} {
+    match HtmlView::attr_name_refused(name) {
+      Some(why) => Syn::error(at, why)
+      None => #()
+    }
+    let n := Syn::lift_text(name, at)
+    match v {
+      Str(tok) => {
+        let literal := View::unquote(tok)
+        match HtmlView::attr_refused(name, literal) {
+          Some(why) => Syn::error(tok.span, why)
+          None => #()
+        }
+        let s := Syn::lift_text(literal, tok.span)
+        quote { Static(Attr($n, $s)) }
+      }
+      TautoExpr(e) => if name == "value" {
+        HtmlView::dyn_attr(u, quote { Value($e) })
+      } else if name == "disabled" {
+        HtmlView::dyn_attr(u, quote { Disabled($e) })
+      } else if name == "checked" { HtmlView::dyn_attr(u, quote { Checked($e) })
+      } else if name == "selected" { HtmlView::dyn_attr(u, quote { Selected($e) })
+      } else if name == "multiple" { HtmlView::dyn_attr(u, quote { Multiple($e) })
+      } else if name == "hidden" { HtmlView::dyn_attr(u, quote { Hidden($e) })
+      } else if name == "required" { HtmlView::dyn_attr(u, quote { Required($e) })
+      } else if name == "readonly" { HtmlView::dyn_attr(u, quote { ReadOnly($e) })
+      } else { HtmlView::dyn_attr(u, quote { Attr($n, AttrText::attr_text($e)) }) }
+    }
+  }
+
+  // A value that follows signals, as an attribute: built again when they change, with the
+  // contexts of the view (`provide`) handled again, as `${…}` of a text does.
+  fn dyn_attr(u: Option(SynExpr), body: SynExpr): SynExpr {
+    match u {
+      Some(v) => quote { Dyn(lifted_part(() => $body)) }
+      None => quote { Dyn(() => $body) }
+    }
+  }
+
+  fn attrs(u: Option(SynExpr), l: List(view::Attr)): List(SynExpr) ! {macro_error, div, overflow} {
+    match l {
+      Nil => Nil
+      Cons(a, rest) => Cons(HtmlView::attr(u, a), HtmlView::attrs(u, rest))
+    }
+  }
+
+  // `(delim_view_tree) => c`, the view built on the tree it is given.
+  pub fn from_ui(
+    d: ViewDialect,
+    c: view::Child,
+    at: SynSpan
+  ): SynExpr ! {macro_error, div, overflow} {
+    let tree := SynIdent {
+      declaration: None,
+      name: "delim_view_tree",
+      ctx: SynCtx { scopes: Nil },
+      span: Syn::call_span()
+    }
+    let body := View::child(d, ExVar(tree), c)
+    ExLam([BName(tree, Some(quote { Tree(HtmlKind, HtmlAttr) }), None)], body, at)
+  }
+
+  // `@mount f(a: ${x})` of the web elements.
+  pub fn html_mount(t: SynExpr, m: view::Mount): SynExpr ! {macro_error, div, overflow} {
+    let props := match m.mount_args {
+      None => Nil
+      Some(l) => Cons(l.mount_arg, HtmlView::prop_tail(l.mount_arg_tail))
+    }
+    let call := ExApp(ExVar(Syn::ident(m.name)), HtmlView::props(props), m.name.span)
+    match HtmlView::ui_of(t) {
+      Some(u) => quote { view_value(() => $call) }
+      None => quote { view_value_in($t, () => $call) }
+    }
+  }
+
+  // `${e}` as a child of the web elements.
+  pub fn html_value(t: SynExpr, e: SynExpr): SynExpr ! {macro_error, div, overflow} {
+    match HtmlView::ui_of(t) {
+      Some(u) => quote { view_value(() => $e) }
+      None => quote { view_value_in($t, () => $e) }
+    }
+  }
+
+  // The tag `name` as the kind of a web element.
+  pub fn html_kind(name: SynToken): SynExpr ! {macro_error, div, overflow} {
+    match HtmlView::tag_refused(name.text) {
+      Some(why) => Syn::error(name.span, why)
+      None => #()
+    }
+    let tag := Syn::lift_text(name.text, name.span)
+    quote { Tag($tag) }
+  }
+
+  fn html_attrs(t: SynExpr, l: List(view::Attr)): List(SynExpr) ! {macro_error, div, overflow} {
+    HtmlView::attrs(HtmlView::ui_of(t), l)
+  }
+
+  // `f` run as a part of the view, with its contexts handled as `${…}` does it (the view is the
+  // one `view!` without a tree took from `ui`).
+  fn html_lift(t: SynExpr, f: SynExpr): SynExpr ! {macro_error, div, overflow} {
+    match HtmlView::ui_of(t) {
+      Some(v) => quote { lifted_part($f) }
+      None => f
+    }
+  }
+
+  // `f`, a builder of a part, kept so that it builds with what stands here.
+  fn html_keep(t: SynExpr, f: SynExpr): SynExpr ! {macro_error, div, overflow} {
+    match HtmlView::ui_of(t) {
+      Some(v) => quote { keep($f) }
+      None => f
+    }
+  }
+
+  // The dialect of the web elements.
+  pub fn html(): ViewDialect {
+    ViewDialect {
+      kind: HtmlView::html_kind,
+      attrs: HtmlView::html_attrs,
+      value: HtmlView::html_value,
+      mount: HtmlView::html_mount,
+      lift: HtmlView::html_lift,
+      keep: HtmlView::html_keep
+    }
+  }
+
+  fn prop_tail(l: List(view::MountArgTail)): List(view::MountArg) {
+    match l {
+      Nil => Nil
+      Cons(p, rest) => Cons(p.mount_arg, HtmlView::prop_tail(rest))
+    }
+  }
+
+  // `@mount f(a: ${x}, b: ${y})` calls `f` once, with each prop a `ReadSignal` that follows
+  // its expression, so the child is not built again when a prop changes. The props are given
+  // in the order they are written; their names say which parameter each one is.
+  fn props(l: List(view::MountArg)): List(SynExpr) ! {macro_error, div, overflow} {
+    match l {
+      Nil => Nil
+      Cons(p, rest) => {
+        let n := p.name.text
+        if Text::len(n) > 1 && Text::slice(
+          n,
+          Text::len(n) - 1,
+          Text::len(n)
+        ) == Some(":") { #() } else {
+          Syn::error(p.name.span, "a prop of @mount is written `name: ${…}`")
+        }
+        let e := p.tauto_expr
+        Cons(quote { readonly(memo(() => $e)) }, HtmlView::props(rest))
+      }
+    }
+  }
+}
+
+pub macro fn view(v: view::View): SynExpr ! {macro_error, div, overflow} {
+  let d := HtmlView::html()
+  match v.tree_input {
+    Some(input) => View::child(d, input, v.child)
+    // The tree is taken from `ui` once, so the closures the view makes (of `@if`, `@for`,
+    // events) hold the tree and do not perform `ui` themselves.
+    None => {
+      let build := HtmlView::from_ui(d, v.child, v.span)
+      quote { view_in($build) }
+    }
+  }
+}

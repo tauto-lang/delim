@@ -1,0 +1,72 @@
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+import "signal.taut" { Signal, get, memo_eq, peek, rt, set, signal }
+
+// An Elm-style store: the state that matters lives in one model, changed only by a pure
+// `update`, so its invariants can be proved about `update` alone. Views read slices of the
+// model with `select`, which runs its readers only when the slice changes.
+//
+// Work that waits (a request, a timer) is not done here: `update` returns it as a job, and
+// the renderer's loop runs the jobs and sends their results back with `dispatch`.
+
+pub(open) struct Next(M: Type, J: Type) { model: M, jobs: List(J) }
+
+pub fn just<M, J>(m: M): Next(M, J) { Next { model: m, jobs: Nil } }
+
+struct Update(M: Type, Msg: Type, J: Type) { run: (M, Msg) -> Next(M, J) ! {div, overflow} }
+
+pub struct(shared) Store(M: Shared + NoBorrow, Msg: Shared + NoBorrow, J: Shared + NoBorrow) {
+  model: delim::src::signal::Signal(M),
+  update: Ref(Update(M, Msg, J)),
+  // The jobs `update` gave and the loop has not taken yet, newest first.
+  jobs: Ref(List(J))
+}
+
+pub fn store<M: Shared + NoBorrow, Msg: Shared + NoBorrow, J: Shared + NoBorrow>(
+  init: M,
+  update: (M, Msg) -> Next(M, J) ! {div, overflow}
+): Store(M, Msg, J) ! {rt} {
+  Store {
+    model: signal(init),
+    update: perform ref_new(Update { run: (m, msg) => update(m, msg) }),
+    jobs: perform ref_new(Nil)
+  }
+}
+
+fn push_jobs<J: Shared + NoBorrow>(l: List(J), acc: List(J)): List(J) {
+  match l {
+    Nil => acc
+    Cons(j, rest) => push_jobs(rest, Cons(j, acc))
+  }
+}
+
+// Sends `msg` to `update` and writes the new model.
+pub fn dispatch<M: Shared + NoBorrow, Msg: Shared + NoBorrow, J: Shared + NoBorrow>(
+  s: Store(M, Msg, J),
+  msg: Msg
+): Unit ! {rt, div} {
+  let u := perform ref_get(s.update)
+  let next := (u.run)(peek(s.model), msg)
+  perform ref_set(s.jobs, push_jobs(next.jobs, perform ref_get(s.jobs)))
+  set(s.model, next.model)
+}
+
+// The jobs given since the last call, oldest first.
+pub fn take_jobs<M: Shared + NoBorrow, Msg: Shared + NoBorrow, J: Shared + NoBorrow>(
+  s: Store(M, Msg, J)
+): List(J) ! {ref_get, ref_set} {
+  let js := perform ref_get(s.jobs)
+  perform ref_set(s.jobs, Nil)
+  push_jobs(js, Nil)
+}
+
+pub fn model<M: Shared + NoBorrow, Msg: Shared + NoBorrow, J: Shared + NoBorrow>(
+  s: Store(M, Msg, J)
+): M ! {rt, overflow} { get(s.model) }
+
+// The slice `f` of the model, followed: its readers run only when the slice changes.
+pub fn select<M: Shared + NoBorrow, Msg: Shared + NoBorrow, J: Shared + NoBorrow, A: Shared + NoBorrow>(
+  s: Store(M, Msg, J),
+  f: (M) -> A ! {div, overflow}
+): delim::src::signal::Signal(A) ! {rt, div} where DecEq(A) {
+  memo_eq(() => f(get(s.model)))
+}

@@ -1,0 +1,95 @@
+import std::text { Text }
+import "../../../delim/src/signal.taut" { Load, get, rt }
+import "../../../delim/src/common.taut" { Vocab }
+import "../../../delim-html/src/html.taut" { trusted }
+import "../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind, checked_html }
+import "../../../delim-html/src/safe.taut" { TrustedHtml, no_html }
+import "../../../delim/src/tree.taut" { Node, Tree, el, text_dyn }
+import "../../../delim/src/resource.taut" { resource }
+import "../../src/site.taut" {
+  Head,
+  Layout,
+  Page,
+  bad_path,
+  document,
+  file_path_ok,
+  page_file,
+  parent_dir
+}
+import "../../src/route.taut" { route }
+import "check.taut" { check }
+
+fn checked_or_empty(html: Text): TrustedHtml ! {div, overflow} {
+  match checked_html(html) {
+    Some(h) => h
+    None => no_html()
+  }
+}
+
+fn hello(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  el(t, Tag("p"), Nil, Cons(trusted(t, checked_or_empty("<em>hi</em>")), Nil))
+}
+
+fn no_load(key: Text): Result(Text, Text) ! {div} { Err("none") }
+
+fn page(): Page {
+  Page {
+    title: "A & B",
+    lang: "ja",
+    head: Cons(
+      Stylesheet("/style.css"),
+      Cons(
+        Meta("description", "say \"hi\""),
+        Cons(
+          Script("javascript:alert(1)"),
+          Cons(
+            Icon("/favicon.svg", "image/svg+xml", "any"),
+            Cons(Icon("javascript:alert(1)", "image/svg+xml", "any"), Nil)
+          )
+        )
+      )
+    ),
+    view: hello
+  }
+}
+
+perform test("site", () => {
+  check(
+    "a document has its language, its head, and the trusted HTML as it is",
+    document(
+      page(),
+      no_load
+    ) == Ok("<!doctype html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\"><title>A &amp; B</title><link rel=\"stylesheet\" href=\"/style.css\"><meta name=\"description\" content=\"say &quot;hi&quot;\"><link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\" sizes=\"any\"></head><body><div id=\"app\"><p><delim-trusted style=\"display:contents\"><em>hi</em></delim-trusted></p></div></body></html>\n")
+  )
+  check(
+    "a page is written as a file by the layout",
+    page_file(
+      Flat,
+      "/a/b"
+    ) == "/a/b.html" && page_file(
+      Directories,
+      "/a/b"
+    ) == "/a/b/index.html" && page_file(Directories, "/") == "/index.html"
+  )
+  check(
+    "an asset path stays under the output",
+    file_path_ok(
+      "/style.css"
+    ) && file_path_ok(
+      "/a/b.js"
+    ) && not(file_path_ok(
+      "style.css"
+    )) && not(file_path_ok("/../x")) && not(file_path_ok("/a//b")) && not(file_path_ok("/a/./b"))
+  )
+  check("the parent of a file is its directory", parent_dir("out/a/b.html") == "out/a")
+  check("a resource that fails to load fails the page, with its key and reason", {
+    let p := Page { title: "", lang: "", head: Nil, view: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => {
+      let s := resource(t, "k")
+      text_dyn(t, () => match get(s) { Loaded(x) => x, Loading => "", LoadFailed(_) => "" })
+    } }
+    document(p, (key: Text) => Err("gone")) == Err("k: gone")
+  })
+  check("a route's path escapes its segments", route(["posts", "a b/c"], page()).path == "/posts/a%20b%2Fc" && route(Nil, page()).path == "/")
+  check("two pages at one path are refused", bad_path([#("/a", page()), #("/b", page()), #("/a", page())]) == Some("/a: two pages have this path"))
+  check("a path out of the output is refused", bad_path([#("/a/../b", page())]) == Some("/a/../b: not a path a page can be written at") && bad_path([#("/", page()), #("/a", page())]) == None)
+})

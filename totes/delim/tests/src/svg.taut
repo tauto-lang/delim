@@ -1,0 +1,104 @@
+import "../../src/common.taut" { Vocab }
+import "../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../../delim-html/src/svg.taut" { Css, css_text, svg_attr_ok, svg_tag_ok, var_ok }
+import "../../src/signal.taut" { get, reactive, rt, set, signal }
+import "../../src/tree.taut" {
+  EventData,
+  EventKind,
+  Node,
+  Prop,
+  Tree,
+  bubbles,
+  el,
+  fire,
+  handler_nodes,
+  tree
+}
+import "../../../delim-html/src/html.taut" { render_html_in }
+
+// SVG, custom properties and drags: the policy the DOM renderer checks them with, what the
+// HTML renderer writes for them (nothing), and which events go up to the nearest handler.
+
+fn drawing(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let line := el(t, Svg("path"), Cons(Static(SvgAttr("d", "M0 0 L10 10")), Nil), Nil)
+  let picture := el(
+    t,
+    Svg("svg"),
+    Cons(Static(SvgAttr("viewBox", "0 0 10 10")), Nil),
+    Cons(line, Nil)
+  )
+  el(
+    t,
+    Tag("div"),
+    Cons(
+      Static(Attr("class", "node")),
+      Cons(Static(Var("--x", Px(4))), Cons(Static(DragSource(true)), Nil))
+    ),
+    Cons(picture, Nil)
+  )
+}
+
+fn has(l: List(u32), n: u32): Bool ! {div} {
+  match l {
+    Nil => false
+    Cons(x, rest) => x == n || has(rest, n)
+  }
+}
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("SVG", () => {
+  assert_case("an SVG shape element is allowed", svg_tag_ok("path") && svg_tag_ok("svg") && svg_tag_ok("linearGradient"))
+  assert_case(
+    "SVG elements that run code or load documents are refused",
+    not(svg_tag_ok("script")) && not(svg_tag_ok("foreignObject")) && not(svg_tag_ok("use")) && not(svg_tag_ok("image")) && not(svg_tag_ok("a")) && not(svg_tag_ok("animate")) && not(svg_tag_ok("set")) && not(svg_tag_ok("style"))
+  )
+  assert_case(
+    "SVG geometry and paint attributes are written",
+    svg_attr_ok("d", "M10 20 C60 20, 90 80, 140 80") && svg_attr_ok("viewBox", "0 0 100 50") && svg_attr_ok("stroke", "hsl(205 68% 62%)") && svg_attr_ok("stroke-dasharray", "5 4") && svg_attr_ok("transform", "translate(-4.5, 2) rotate(45)") && svg_attr_ok("fill", "#1b2431")
+  )
+  assert_case("a local url(#…) reference is written", svg_attr_ok("marker-end", "url(#arrow)"))
+  assert_case(
+    "handlers, href and style are not SVG attributes",
+    not(svg_attr_ok("onload", "x")) && not(svg_attr_ok("href", "#a")) && not(svg_attr_ok("xlink:href", "#a")) && not(svg_attr_ok("style", "fill:red"))
+  )
+  assert_case(
+    "an SVG value cannot load a URL or end itself",
+    not(svg_attr_ok("fill", "url(https//x)")) && not(svg_attr_ok("fill", "URL(x)")) && not(svg_attr_ok("fill", "red;x")) && not(svg_attr_ok("d", "M0 0\"><script>")) && not(svg_attr_ok("fill", "javascript:x")) && not(svg_attr_ok("fill", "a&b"))
+  )
+  assert_case(
+    "a custom property name is -- and letters, digits, - and _",
+    var_ok("--x") && var_ok("--node-left_2") && not(var_ok("--")) && not(var_ok("left")) && not(var_ok("-x")) && not(var_ok("--x;color")) && not(var_ok("--x:1")) && not(var_ok("--a b"))
+  )
+  assert_case(
+    "a custom property value is a number and its unit",
+    css_text(Px(12)) == "12px" && css_text(Px(-3)) == "-3px" && css_text(Pct(50)) == "50%" && css_text(Num(205)) == "205" && css_text(Deg(-90)) == "-90deg" && css_text(Unset) == ""
+  )
+  assert_case(
+    "the HTML renderer writes no SVG, custom property or drag",
+    render_html_in(drawing) == "<div class=\"node\"><delim-refused hidden><delim-refused hidden></delim-refused></delim-refused></div>"
+  )
+  assert_case(
+    "presses, keys, edits, pointer presses and moves, submits, actions, drops, key releases, double presses, context menus, wheels and pastes bubble",
+    bubbles(Press) && bubbles(Key) && bubbles(Edit) && bubbles(PointerDown) && bubbles(PointerMove) && bubbles(PointerUp) && bubbles(Submit) && bubbles(NamedAction("x")) && bubbles(Drop) && bubbles(KeyUp) && bubbles(DoubleClick) && bubbles(ContextMenu) && bubbles(Wheel) && bubbles(Paste)
+  )
+  assert_case(
+    "focus, enter, leave, scroll and the source's drag events do not bubble",
+    not(bubbles(Focus)) && not(bubbles(Blur)) && not(bubbles(PointerEnter)) && not(bubbles(PointerLeave)) && not(bubbles(Scroll)) && not(bubbles(DragStart)) && not(bubbles(DragMove)) && not(bubbles(DragEnd))
+  )
+  assert_case("handler_nodes names the nodes with a handler of the kind", reactive(() => {
+    let t: Tree(HtmlKind, HtmlAttr) := tree()
+    let dropped := signal(0)
+    let target := el(t, Tag("div"), Cons(On(Drop, (d: EventData) => match d {
+      Pointer(x, y, b) => set(dropped, x)
+      NoData => #()
+      KeyData(k) => #()
+      TextData(s) => #()
+      ScrollData(dx, dy) => #()
+    }), Nil), Nil)
+    let other := el(t, Tag("div"), Cons(On(Press, (d: EventData) => #()), Nil), Nil)
+    let drops := handler_nodes(t, Drop)
+    fire(t, target, Drop, Pointer(7, 8, 0))
+    has(drops, target.id) && not(has(drops, other.id)) && has(handler_nodes(t, Press), other.id) && get(dropped) == 7
+  }))
+})

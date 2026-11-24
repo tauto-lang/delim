@@ -1,0 +1,242 @@
+// Codecs: how a value crosses between the browser and the server as text. A server function
+// and a resource carry the codecs of what they take and give, so both sides read the other
+// with the same codec, and a value that does not decode is refused rather than misread.
+
+pub(open) struct Codec(A: Type) {
+  // Stable wire-format descriptor; custom mappings MUST version their own schema.
+  schema: Text,
+  encode: (a: A) -> Text ! {overflow, div},
+  decode: (t: Text) -> Option(A) ! {overflow, div}
+}
+
+pub fn text_codec(): Codec(Text) {
+  Codec { schema: "text/utf8/v1", encode: (a: Text) => a, decode: (t: Text) => Some(t) }
+}
+
+fn digit_text(d: u64): Text ! {overflow} {
+  match Text::slice("0123456789", d, d + 1) {
+    Some(x) => x
+    None => "0"
+  }
+}
+
+pub fn u64_text(n: u64): Text ! {overflow, div} {
+  if n < 10 { digit_text(n) } else { concat(u64_text(div(n, 10)), digit_text(mod(n, 10))) }
+}
+
+// The number the decimal digits of `t` from `i` write, or `None` for anything else, or for
+// a number above `u64`'s range.
+fn u64_of_digits(t: Text, i: u64, acc: u64): Option(u64) ! {overflow, div} {
+  match Text::byte(t, i) {
+    None => Some(acc)
+    Some(b) => {
+      let c := U64::of_u8(b)
+      if c < 48 || c > 57 { None } else if acc > div(18446744073709551615 - (c - 48), 10) {
+        None
+      } else { u64_of_digits(t, i + 1, acc * 10 + (c - 48)) }
+    }
+  }
+}
+
+pub fn u64_of_text(t: Text): Option(u64) ! {overflow, div} {
+  if Text::len(t) == 0 { None } else { u64_of_digits(t, 0, 0) }
+}
+
+pub fn u64_codec(): Codec(u64) {
+  Codec {
+    schema: "u64/decimal/v1",
+    encode: (a: u64) => u64_text(a),
+    decode: (t: Text) => u64_of_text(t)
+  }
+}
+
+pub fn bool_codec(): Codec(Bool) {
+  Codec {
+    schema: "bool/true-false/v1",
+    encode: (a: Bool) => if a { "true" } else { "false" },
+    decode: (t: Text) => if t == "true" { Some(true) } else if t == "false" { Some(false) } else {
+      None
+    }
+  }
+}
+
+pub fn unit_codec(): Codec(Unit) {
+  Codec {
+    schema: "unit/empty/v1",
+    encode: (a: Unit) => "",
+    decode: (t: Text) => if t == "" { Some(#()) } else { None }
+  }
+}
+
+// A list, as each item's encoding after its length in bytes and `:`, so that an item may
+// hold any text.
+pub fn list_codec<A: Shared>(c: Codec(A)): Codec(List(A)) {
+  Codec {
+    schema: concat("list/length/v1:", c.schema),
+    encode: (a: List(A)) => list_text(c, a),
+    decode: (t: Text) => list_of_text(c, t, 0, Nil)
+  }
+}
+
+// Written into one buffer in a loop, so that a long list takes neither stack nor time
+// beyond its length.
+fn list_text<A: Shared>(c: Codec(A), l: List(A)): Text ! {overflow, div} {
+  var b := Buf::new()
+  var r := l
+  var go := true
+  while go {
+    match r {
+      Nil => { go := false }
+      Cons(x, rest) => {
+        let e := (c.encode)(x)
+        let n := concat(u64_text(Text::len(e)), ":")
+        Buf::push(&mut b, &n)
+        Buf::push(&mut b, &e)
+        r := rest
+      }
+    }
+  }
+  Text::of(b)
+}
+
+fn reverse_onto<A>(l: List(A), acc: List(A)): List(A) {
+  match l {
+    Nil => acc
+    Cons(x, rest) => reverse_onto(rest, Cons(x, acc))
+  }
+}
+
+// The length before the `:` at `i`, and where the item starts.
+fn length_at(t: Text, i: u64, acc: u64): Option(u64 × u64) ! {overflow, div} {
+  match Text::byte(t, i) {
+    None => None
+    Some(b) => {
+      let c := U64::of_u8(b)
+      if c == 58 { Some(#(acc, i + 1)) } else if c < 48 || c > 57 {
+        None
+      } else if acc > div(18446744073709551615 - (c - 48), 10) { None } else {
+        length_at(t, i + 1, acc * 10 + (c - 48))
+      }
+    }
+  }
+}
+
+// The items from `i`, the ones read so far newest first in `acc`. Each step calls itself last,
+// so a list of many items runs as a loop rather than a frame for each item. A length larger
+// than what is left of `t` is refused before `start + len` is added, so it cannot overflow.
+fn list_of_text<A: Shared>(
+  c: Codec(A),
+  t: Text,
+  i: u64,
+  acc: List(A)
+): Option(List(A)) ! {overflow, div} {
+  if i == Text::len(t) { Some(reverse_onto(acc, Nil)) } else {
+    match length_at(t, i, 0) {
+      None => None
+      Some(p) => {
+        let #(len, start) := p
+        if start == i + 1 || len > Text::len(t) - start { None } else {
+          match Text::slice(t, start, start + len) {
+            None => None
+            Some(item) => match (c.decode)(item) {
+              None => None
+              Some(x) => list_of_text(c, t, start + len, Cons(x, acc))
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// An optional value: empty for none, and `+` before the value's encoding for one.
+pub fn option_codec<A: Shared>(c: Codec(A)): Codec(Option(A)) {
+  Codec {
+    schema: concat("option/plus/v1:", c.schema),
+    encode: (a: Option(A)) => match a {
+      None => ""
+      Some(x) => concat("+", (c.encode)(x))
+    },
+    decode: (t: Text) => if t == "" { Some(None) } else {
+      match Text::slice(t, 0, 1) {
+        Some(h) => if h == "+" {
+          match Text::slice(t, 1, Text::len(t)) {
+            None => None
+            Some(rest) => match (c.decode)(rest) {
+              None => None
+              Some(x) => Some(Some(x))
+            }
+          }
+        } else { None }
+        None => None
+      }
+    }
+  }
+}
+
+// The codec of a type made from another's, such as a struct from a list or a pair: `to`
+// may refuse what it is given.
+pub fn mapped_codec<A: Shared, B: Shared>(
+  schema: Text,
+  c: Codec(A),
+  to: (a: A) -> Option(B) ! {overflow, div},
+  convert_back: (b: B) -> A ! {overflow, div}
+): Codec(B) {
+  Codec {
+    schema: concat(concat("mapped/v1:", schema_part(schema)), schema_part(c.schema)),
+    encode: (b: B) => (c.encode)(convert_back(b)),
+    decode: (t: Text) => match (c.decode)(t) {
+      None => None
+      Some(a) => to(a)
+    }
+  }
+}
+
+fn pair_text<A: Shared, B: Shared>(a: Codec(A), b: Codec(B), p: A × B): Text ! {overflow, div} {
+  match p {
+    #(x, y) => {
+      let e := (a.encode)(x)
+      concat(concat(concat(u64_text(Text::len(e)), ":"), e), (b.encode)(y))
+    }
+  }
+}
+
+// Two values, the first after its length in bytes and `:`.
+pub fn pair_codec<A: Shared, B: Shared>(a: Codec(A), b: Codec(B)): Codec(A × B) {
+  Codec {
+    schema: concat(
+      concat(concat(concat("pair/length/v1:", Text::of_u64(Text::len(a.schema))), ":"), a.schema),
+      b.schema
+    ),
+    encode: (p: A × B) => pair_text(a, b, p),
+    decode: (t: Text) => match length_at(t, 0, 0) {
+      None => None
+      Some(l) => {
+        let #(len, start) := l
+        if start == 1 { None } else {
+          match Text::slice(t, start, start + len) {
+            None => None
+            Some(x) => match Text::slice(t, start + len, Text::len(t)) {
+              None => None
+              Some(y) => match (a.decode)(x) {
+                None => None
+                Some(va) => match (b.decode)(y) {
+                  None => None
+                  Some(vb) => Some(#(va, vb))
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn schema_part(value: Text): Text {
+  concat(concat(Text::of_u64(Text::len(value)), ":"), value)
+}
+
+// The fields of a form, each its name and its text, in the order the form has them. A server
+// function that takes this can be sent from a page without JavaScript (`web_form.taut`).
+pub fn form_codec(): Codec(List(Text × Text)) { list_codec(pair_codec(text_codec(), text_codec())) }

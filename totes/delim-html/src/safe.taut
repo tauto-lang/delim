@@ -1,0 +1,358 @@
+import std::base { List }
+import "policy.taut" { Attr, is_digit_byte, is_lower, tag_allowed }
+
+// HTML that is safe to write into a page as it is, as the kernel reads it.
+//
+// `html_safe` reads bytes as a browser's tokenizer would, but accepts only a small part of
+// HTML: text with no `<`; a start tag of an element `tag_allowed` lets through, with attributes
+// that `Attr::value_allowed` lets through, each written ` name` or ` name="value"` with no `"`
+// or `<` in the value; an end tag of such an element; and a comment `<!--` digits `-->`. Nothing it
+// accepts opens a script, a style sheet, a frame or foreign content, sets a handler, or writes
+// a URL that runs code. That is the one claim the proofs below rest on and cannot check: it is
+// about browsers, not about the program.
+//
+// A `TrustedHtml` carries a proof that `html_safe` accepts its bytes, so one cannot be made
+// for any other bytes: the proof is erased when the program runs.
+
+// ---- escaping ---------------------------------------------------------------------------------
+
+fn amp_bytes(): List(Nat) { [38, 97, 109, 112, 59] } // &amp;
+
+fn lt_bytes(): List(Nat) { [38, 108, 116, 59] } // &lt;
+
+fn gt_bytes(): List(Nat) { [38, 103, 116, 59] } // &gt;
+
+fn quot_bytes(): List(Nat) { [38, 113, 117, 111, 116, 59] } // &quot;
+
+pub module Escape {
+  fn quot_as(y: Bool, c: Nat): List(Nat) {
+    match y {
+      true => quot_bytes()
+      false => [c]
+    }
+  }
+
+  fn gt_as(y: Bool, c: Nat): List(Nat) {
+    match y {
+      true => gt_bytes()
+      false => Escape::quot_as(Nat::eq(c, 34), c)
+    }
+  }
+
+  fn lt_as(y: Bool, c: Nat): List(Nat) {
+    match y {
+      true => lt_bytes()
+      false => Escape::gt_as(Nat::eq(c, 62), c)
+    }
+  }
+
+  pub fn amp_as(y: Bool, c: Nat): List(Nat) {
+    match y {
+      true => amp_bytes()
+      false => Escape::lt_as(Nat::eq(c, 60), c)
+    }
+  }
+
+  // Bytes as HTML that shows them, in text and in an attribute value.
+  pub fn html(w: List(Nat)): List(Nat) {
+    match w {
+      Nil => Nil
+      Cons(c, rest) => List::append(escape_html_byte(c), Escape::html(rest))
+    }
+  }
+
+  // ---- reading ----------------------------------------------------------------------------------
+
+  theorem quot_text(
+    y: Bool,
+    c: Nat,
+    lt: Nat::eq(c, 60) = false
+  ): scan(SText, Escape::quot_as(y, c)) = SText {
+    match y {
+      true => Refl
+      false => text_step(c, lt)
+    }
+  }
+
+  theorem gt_text(
+    y: Bool,
+    c: Nat,
+    lt: Nat::eq(c, 60) = false
+  ): scan(SText, Escape::gt_as(y, c)) = SText {
+    match y {
+      true => Refl
+      false => Escape::quot_text(Nat::eq(c, 34), c, lt)
+    }
+  }
+
+  theorem lt_text(
+    y: Bool,
+    c: Nat,
+    e: Nat::eq(c, 60) = y
+  ): scan(SText, Escape::lt_as(y, c)) = SText {
+    match y {
+      true => Refl
+      false => Escape::gt_text(Nat::eq(c, 62), c, e)
+    }
+  }
+
+  theorem amp_text(y: Bool, c: Nat): scan(SText, Escape::amp_as(y, c)) = SText {
+    match y {
+      true => Refl
+      false => Escape::lt_text(Nat::eq(c, 60), c, Refl)
+    }
+  }
+
+  // Escaped text read from text ends in text.
+  pub theorem html_scan(w: List(Nat)): scan(SText, Escape::html(w)) = SText {
+    match w {
+      Nil => Refl
+      Cons(c, rest) => Eq::trans(
+        Scan::append(SText, escape_html_byte(c), Escape::html(rest)),
+        Eq::trans(
+          Eq::congr((s: Scan) => scan(s, Escape::html(rest)), Escape::amp_text(Nat::eq(c, 38), c)),
+          Escape::html_scan(rest)
+        )
+      )
+    }
+  }
+
+  // Escaped text is safe HTML, whatever it escapes.
+  pub theorem safe(w: List(Nat)): html_safe(Escape::html(w)) = true {
+    Eq::congr((s: Scan) => Scan::done(s), Escape::html_scan(w))
+  }
+
+  // ---- trusted HTML -----------------------------------------------------------------------------
+}
+
+// A byte as HTML that shows it: `&`, `<`, `>` and `"` as character references.
+fn escape_html_byte(c: Nat): List(Nat) { Escape::amp_as(Nat::eq(c, 38), c) }
+
+// Where `html_safe` is in the bytes. Names and values are kept reversed.
+pub(open) inductive Scan: Type {
+  // In text.
+  SText: Scan
+  // After `<`.
+  SLt: Scan
+  // In the name of a start tag.
+  SOpen(name: List(Nat)): Scan
+  // In the name of an end tag, after `</`.
+  SClose(name: List(Nat)): Scan
+  // In a start tag, after its name or a quoted value.
+  STag: Scan
+  // In a start tag, after a space: an attribute's name comes.
+  SSpace: Scan
+  // In the name of an attribute.
+  SAttr(name: List(Nat)): Scan
+  // After `=`: `"` comes.
+  SEq(name: List(Nat)): Scan
+  // In a quoted value.
+  SValue(name: List(Nat), value: List(Nat)): Scan
+  // After `<!`.
+  SBang: Scan
+  // After `<!-`.
+  SDash: Scan
+  // In the digits of a comment; `true` once there is one.
+  SDigits(any: Bool): Scan
+  // After the first `-` that ends a comment.
+  SEnd1: Scan
+  // After `--`.
+  SEnd2: Scan
+  // Not safe HTML.
+  SFail: Scan
+}
+
+// A byte of a name: a lowercase letter, a digit or `-`.
+fn name_byte(c: Nat): Bool { Bool::or(is_lower(c), Bool::or(is_digit_byte(c), Nat::eq(c, 45))) }
+
+fn scan_if(y: Bool, s: Scan): Scan {
+  match y { true => s, false => SFail }
+}
+
+pub module Scan {
+  pub fn text_as(y: Bool): Scan {
+    match y { true => SLt, false => SText }
+  }
+
+  fn lt(c: Nat): Scan {
+    match Nat::eq(c, 47) {
+      true => SClose(Nil)
+      false => ⊢ Scan from match Nat::eq(c, 33) {
+        true => SBang
+        false => scan_if(is_lower(c), SOpen([c]))
+      }
+    }
+  }
+
+  // After the name of a start tag, at `c`.
+  fn open_end(name: List(Nat), c: Nat): Scan {
+    match Nat::eq(c, 32) {
+      true => scan_if(tag_allowed(List::reverse(name)), SSpace)
+      false => ⊢ Scan from match Nat::eq(c, 62) {
+        true => scan_if(tag_allowed(List::reverse(name)), SText)
+        false => SFail
+      }
+    }
+  }
+
+  fn open_as(y: Bool, name: List(Nat), c: Nat): Scan {
+    match y {
+      true => SOpen(Cons(c, name))
+      false => Scan::open_end(name, c)
+    }
+  }
+
+  fn close_as(y: Bool, name: List(Nat), c: Nat): Scan {
+    match y {
+      true => SClose(Cons(c, name))
+      false => ⊢ Scan from match Nat::eq(c, 62) {
+        true => scan_if(tag_allowed(List::reverse(name)), SText)
+        false => SFail
+      }
+    }
+  }
+
+  fn tag(c: Nat): Scan {
+    match Nat::eq(c, 32) {
+      true => SSpace
+      false => ⊢ Scan from match Nat::eq(c, 62) { true => SText, false => SFail }
+    }
+  }
+
+  // After the name of an attribute with no value, at `c`.
+  fn attr_end(name: List(Nat), c: Nat): Scan {
+    match Nat::eq(c, 61) {
+      true => SEq(name)
+      false => ⊢ Scan from match Nat::eq(c, 32) {
+        true => scan_if(Attr::value_allowed(List::reverse(name), Nil), SSpace)
+        false => ⊢ Scan from match Nat::eq(c, 62) {
+          true => scan_if(Attr::value_allowed(List::reverse(name), Nil), SText)
+          false => SFail
+        }
+      }
+    }
+  }
+
+  fn attr_as(y: Bool, name: List(Nat), c: Nat): Scan {
+    match y {
+      true => SAttr(Cons(c, name))
+      false => Scan::attr_end(name, c)
+    }
+  }
+
+  fn value_as(y: Bool, name: List(Nat), value: List(Nat), c: Nat): Scan {
+    match y {
+      true => scan_if(Attr::value_allowed(List::reverse(name), List::reverse(value)), STag)
+      // A `<` in a value is refused: after `<textarea>`, a browser reads a value's
+      // `</textarea>` as the end of the element.
+      false => scan_if(not(Nat::eq(c, 60)), SValue(name, Cons(c, value)))
+    }
+  }
+
+  fn digits(any: Bool, c: Nat): Scan {
+    match is_digit_byte(c) {
+      true => SDigits(true)
+      false => ⊢ Scan from match Nat::eq(c, 45) {
+        true => scan_if(any, SEnd1)
+        false => SFail
+      }
+    }
+  }
+
+  pub fn byte(s: Scan, c: Nat): Scan {
+    match s {
+      SText => Scan::text_as(Nat::eq(c, 60))
+      SLt => Scan::lt(c)
+      SOpen(name) => Scan::open_as(name_byte(c), name, c)
+      SClose(name) => Scan::close_as(name_byte(c), name, c)
+      STag => Scan::tag(c)
+      SSpace => scan_if(is_lower(c), SAttr([c]))
+      SAttr(name) => Scan::attr_as(name_byte(c), name, c)
+      SEq(name) => scan_if(Nat::eq(c, 34), SValue(name, Nil))
+      SValue(name, value) => Scan::value_as(Nat::eq(c, 34), name, value, c)
+      SBang => scan_if(Nat::eq(c, 45), SDash)
+      SDash => scan_if(Nat::eq(c, 45), SDigits(false))
+      SDigits(any) => Scan::digits(any, c)
+      SEnd1 => scan_if(Nat::eq(c, 45), SEnd2)
+      SEnd2 => scan_if(Nat::eq(c, 62), SText)
+      SFail => SFail
+    }
+  }
+
+  pub fn done(s: Scan): Bool {
+    match s {
+      SText => true
+      SLt => false
+      SOpen(name) => false
+      SClose(name) => false
+      STag => false
+      SSpace => false
+      SAttr(name) => false
+      SEq(name) => false
+      SValue(name, value) => false
+      SBang => false
+      SDash => false
+      SDigits(any) => false
+      SEnd1 => false
+      SEnd2 => false
+      SFail => false
+    }
+  }
+
+  pub theorem append(
+    s: Scan,
+    a: List(Nat),
+    b: List(Nat)
+  ): scan(s, List::append(a, b)) = scan(scan(s, a), b) {
+    match a {
+      Nil => Refl
+      Cons(c, rest) => Scan::append(Scan::byte(s, c), rest, b)
+    }
+  }
+}
+
+pub fn scan(s: Scan, w: List(Nat)): Scan {
+  match w {
+    Nil => s
+    Cons(c, rest) => scan(Scan::byte(s, c), rest)
+  }
+}
+
+// Whether `w` is safe HTML: read from text, it ends in text.
+pub fn html_safe(w: List(Nat)): Bool { Scan::done(scan(SText, w)) }
+
+// ---- what is proved ---------------------------------------------------------------------------
+
+// A byte that is not `<` keeps text text.
+theorem text_step(c: Nat, h: Nat::eq(c, 60) = false): scan(SText, [c]) = SText {
+  Eq::congr((y: Bool) => Scan::text_as(y), h)
+}
+
+// HTML `html_safe` accepts, with the proof.
+pub(open) inductive TrustedHtml: Type {
+  Mk(bytes: List(Nat), ok: html_safe(bytes) = true): TrustedHtml
+}
+
+pub fn trusted_bytes(h: TrustedHtml): List(Nat) {
+  match h {
+    Mk(b, ok) => b
+  }
+}
+
+// Bytes as HTML that shows them.
+pub fn escaped_bytes(
+  w: List(Nat)
+): TrustedHtml { TrustedHtml::Mk(Escape::html(w), Escape::safe(w)) }
+
+fn checked_as(y: Bool, w: List(Nat), e: html_safe(w) = y): Option(TrustedHtml) {
+  match y {
+    true => Some(TrustedHtml::Mk(w, e))
+    false => None
+  }
+}
+
+// `w` as trusted HTML, when `html_safe` accepts it.
+pub fn checked_bytes(w: List(Nat)): Option(TrustedHtml) { checked_as(html_safe(w), w, Refl) }
+
+// No HTML at all.
+pub fn no_html(): TrustedHtml { TrustedHtml::Mk(Nil, Refl) }

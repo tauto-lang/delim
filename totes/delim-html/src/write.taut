@@ -1,0 +1,285 @@
+import "policy.taut" { Attr, tag_void }
+import std::base { List }
+import "safe.taut" { Escape, Scan, TrustedHtml, html_safe, scan, trusted_bytes }
+
+// The HTML renderer's output, as the kernel reads it: a tree of elements, texts, numbered
+// marks and trusted HTML, written as bytes. `write_safe` proves that whatever the tree holds,
+// `html_safe` accepts what is written: texts and attribute values are escaped, trusted HTML
+// carries its own proof, and each tag and mark is written only when `html_safe` accepts it on
+// its own. The renderer gives only tags and attributes the policy allows, so in practice none
+// is left out.
+
+pub(open) inductive HTree: Type {
+  // A text, escaped when written.
+  HText(bytes: List(Nat)): HTree
+  // A comment with a node's number, which the DOM renderer hydrates by.
+  HMark(digits: List(Nat)): HTree
+  // An element with attributes (name, value) and children. An element `tag_void` names has
+  // no end tag, and its children are not written.
+  HEl(tag: List(Nat), attrs: List(@name List(Nat) × @value List(Nat)), children: List(HTree)): HTree
+  // An element whose content is trusted HTML, written as it is.
+  HRaw(tag: List(Nat), attrs: List(@name List(Nat) × @value List(Nat)), html: TrustedHtml): HTree
+}
+
+// Reverse onto a suffix with constant host stack usage. HTML byte lists are
+// often much longer than the DOM tree is deep.
+fn reverse_bytes(xs: List(Nat), suffix: List(Nat)): List(Nat) {
+  match xs {
+    Nil => suffix
+    Cons(x, rest) => reverse_bytes(rest, Cons(x, suffix))
+  }
+}
+fn append_bytes(xs: List(Nat), suffix: List(Nat)): List(Nat) {
+  reverse_bytes(reverse_bytes(xs, Nil), suffix)
+}
+theorem reverse_bytes_twice(
+  xs: List(Nat),
+  acc: List(Nat),
+  suffix: List(Nat)
+): reverse_bytes(reverse_bytes(xs, acc), suffix) = reverse_bytes(acc, List::append(xs, suffix)) {
+  match xs {
+    Nil => Refl
+    Cons(x, rest) => reverse_bytes_twice(rest, Cons(x, acc), suffix)
+  }
+}
+theorem append_bytes_eq(
+  xs: List(Nat),
+  suffix: List(Nat)
+): append_bytes(xs, suffix) = List::append(xs, suffix) {
+  reverse_bytes_twice(xs, Nil, suffix)
+}
+
+// ---- writing ----------------------------------------------------------------------------------
+
+fn guard_as(y: Bool, w: List(Nat)): List(Nat) {
+  match y { true => w, false => Nil }
+}
+
+// `w` when `html_safe` accepts it on its own; nothing otherwise.
+fn guard(w: List(Nat)): List(Nat) { guard_as(html_safe(w), w) }
+
+fn value_as(empty: Bool, escaped: List(Nat)): List(Nat) {
+  match empty {
+    true => Nil
+    false => Cons(61, Cons(34, append_bytes(escaped, [34])))
+  }
+}
+
+fn is_nil(w: List(Nat)): Bool {
+  match w {
+    Nil => true
+    Cons(c, rest) => false
+  }
+}
+
+// ` name="value"`, or ` name` for an empty value, when the policy allows it.
+fn attr_as(y: Bool, name: List(Nat), escaped: List(Nat)): List(Nat) {
+  match y {
+    true => Cons(32, append_bytes(name, value_as(is_nil(escaped), escaped)))
+    false => Nil
+  }
+}
+
+pub module Attr {
+  pub fn bytes(name: List(Nat), escaped: List(Nat)): List(Nat) {
+    attr_as(Attr::value_allowed(name, escaped), name, escaped)
+  }
+}
+
+fn attrs_bytes(l: List(@name List(Nat) × @value List(Nat))): List(Nat) {
+  match l {
+    Nil => Nil
+    Cons(a, rest) => append_bytes(
+      Attr::bytes((a: @name List(Nat)), Escape::html((a: @value List(Nat)))),
+      attrs_bytes(rest)
+    )
+  }
+}
+
+fn start_tag(tag: List(Nat), attrs: List(@name List(Nat) × @value List(Nat))): List(Nat) {
+  guard(Cons(60, append_bytes(tag, append_bytes(attrs_bytes(attrs), [62]))))
+}
+
+fn end_tag(tag: List(Nat)): List(Nat) { guard(Cons(60, Cons(47, append_bytes(tag, [62])))) }
+
+fn element_as(void: Bool, start: List(Nat), inner: List(Nat), end: List(Nat)): List(Nat) {
+  match void {
+    true => start
+    false => append_bytes(start, append_bytes(inner, end))
+  }
+}
+
+fn element(
+  tag: List(Nat),
+  attrs: List(@name List(Nat) × @value List(Nat)),
+  inner: List(Nat)
+): List(Nat) {
+  element_as(tag_void(tag), start_tag(tag, attrs), inner, end_tag(tag))
+}
+
+// `<!--digits-->`.
+fn mark_bytes(digits: List(Nat)): List(Nat) {
+  guard(Cons(60, Cons(33, Cons(45, Cons(45, append_bytes(digits, [45, 45, 62]))))))
+}
+
+mutual {
+  // The tree as HTML.
+  pub fn write(t: HTree): List(Nat) {
+    match t {
+      HText(b) => Escape::html(b)
+      HMark(d) => mark_bytes(d)
+      HEl(tag, attrs, cs) => element(tag, attrs, write_all(cs))
+      HRaw(tag, attrs, h) => element(tag, attrs, trusted_bytes(h))
+    }
+  }
+
+  pub fn write_all(ts: List(HTree)): List(Nat) {
+    match ts {
+      Nil => Nil
+      Cons(t, rest) => append_bytes(write(t), write_all(rest))
+    }
+  }
+}
+
+// ---- what is proved ---------------------------------------------------------------------------
+
+// Bytes that, read from text, end in text.
+fn keeps_text(w: List(Nat)): std::prelude::Prop { scan(SText, w) = SText }
+
+theorem keeps_text_append(
+  a: List(Nat),
+  b: List(Nat),
+  ha: keeps_text(a),
+  hb: keeps_text(b)
+): keeps_text(append_bytes(a, b)) {
+  Eq::trans(
+    Eq::congr((w: List(Nat)) => scan(SText, w), append_bytes_eq(a, b)),
+    Eq::trans(Scan::append(SText, a, b), Eq::trans(Eq::congr((s: Scan) => scan(s, b), ha), hb))
+  )
+}
+
+// Where `Scan::done` says yes, the reading is in text.
+theorem done_text(s: Scan, h: Scan::done(s) = true): s = SText {
+  match s {
+    SText => Refl
+    SLt => False::elim(false_ne_true(h))
+    SOpen(name) => False::elim(false_ne_true(h))
+    SClose(name) => False::elim(false_ne_true(h))
+    STag => False::elim(false_ne_true(h))
+    SSpace => False::elim(false_ne_true(h))
+    SAttr(name) => False::elim(false_ne_true(h))
+    SEq(name) => False::elim(false_ne_true(h))
+    SValue(name, value) => False::elim(false_ne_true(h))
+    SBang => False::elim(false_ne_true(h))
+    SDash => False::elim(false_ne_true(h))
+    SDigits(any) => False::elim(false_ne_true(h))
+    SEnd1 => False::elim(false_ne_true(h))
+    SEnd2 => False::elim(false_ne_true(h))
+    SFail => False::elim(false_ne_true(h))
+  }
+}
+
+// What `html_safe` accepts keeps text.
+theorem safe_keeps_text(w: List(Nat), h: html_safe(w) = true): keeps_text(w) {
+  done_text(scan(SText, w), h)
+}
+
+theorem guard_as_keeps_text(
+  y: Bool,
+  w: List(Nat),
+  e: html_safe(w) = y
+): keeps_text(guard_as(y, w)) {
+  match y {
+    true => safe_keeps_text(w, e)
+    false => Refl
+  }
+}
+
+theorem guard_keeps_text(w: List(Nat)): keeps_text(guard(w)) {
+  guard_as_keeps_text(html_safe(w), w, Refl)
+}
+
+theorem element_as_keeps_text(
+  void: Bool,
+  start: List(Nat),
+  inner: List(Nat),
+  end: List(Nat),
+  hs: keeps_text(start),
+  hi: keeps_text(inner),
+  he: keeps_text(end)
+): keeps_text(element_as(void, start, inner, end)) {
+  match void {
+    true => hs
+    false => keeps_text_append(
+      start,
+      append_bytes(inner, end),
+      hs,
+      keeps_text_append(inner, end, hi, he)
+    )
+  }
+}
+
+theorem element_keeps_text(
+  tag: List(Nat),
+  attrs: List(@name List(Nat) × @value List(Nat)),
+  inner: List(Nat),
+  hi: keeps_text(inner)
+): keeps_text(element(tag, attrs, inner)) {
+  element_as_keeps_text(
+    tag_void(tag),
+    start_tag(tag, attrs),
+    inner,
+    end_tag(tag),
+    guard_keeps_text(Cons(60, append_bytes(tag, append_bytes(attrs_bytes(attrs), [62])))),
+    hi,
+    guard_keeps_text(Cons(60, Cons(47, append_bytes(tag, [62]))))
+  )
+}
+
+theorem trusted_keeps_text(h: TrustedHtml): keeps_text(trusted_bytes(h)) {
+  match h {
+    Mk(b, ok) => safe_keeps_text(b, ok)
+  }
+}
+
+mutual {
+  theorem write_keeps_text(t: HTree): keeps_text(write(t)) {
+    match t {
+      HText(b) => Escape::html_scan(b)
+      HMark(d) => guard_keeps_text(
+        Cons(60, Cons(33, Cons(45, Cons(45, append_bytes(d, [45, 45, 62])))))
+      )
+      HEl(tag, attrs, cs) => element_keeps_text(tag, attrs, write_all(cs), write_all_keeps_text(cs))
+      HRaw(tag, attrs, h) => element_keeps_text(tag, attrs, trusted_bytes(h), trusted_keeps_text(h))
+    }
+  }
+
+  theorem write_all_keeps_text(ts: List(HTree)): keeps_text(write_all(ts)) {
+    match ts {
+      Nil => Refl
+      Cons(t, rest) => keeps_text_append(
+        write(t),
+        write_all(rest),
+        write_keeps_text(t),
+        write_all_keeps_text(rest)
+      )
+    }
+  }
+}
+
+// Whatever the tree holds, `html_safe` accepts what is written.
+pub theorem write_safe(t: HTree): html_safe(write(t)) = true {
+  Eq::congr((s: Scan) => Scan::done(s), write_keeps_text(t))
+}
+
+// The tree as trusted HTML.
+fn written(t: HTree): TrustedHtml { TrustedHtml::Mk(write(t), write_safe(t)) }
+
+pub theorem write_all_safe(ts: List(HTree)): html_safe(write_all(ts)) = true {
+  Eq::congr((s: Scan) => Scan::done(s), write_all_keeps_text(ts))
+}
+
+// The trees one after another as trusted HTML.
+pub fn written_all(
+  ts: List(HTree)
+): TrustedHtml { TrustedHtml::Mk(write_all(ts), write_all_safe(ts)) }

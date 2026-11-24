@@ -1,0 +1,107 @@
+import "signal.taut" { Signal, get, peek, rt, set, signal, watch }
+
+// A read-only shared view of a single operation. Cancellation authority stays with its owner.
+pub(open) enum ResourceState(A: Type, E: Type) {
+  Pending
+  Ready(A)
+  Failed(E)
+  Cancelled
+}
+pub struct(shared) Resource(
+  A: Shared + NoBorrow,
+  E: Shared + NoBorrow
+) { value: Signal(ResourceState(A, E)) }
+pub fn resource_handle<A: Shared + NoBorrow, E: Shared + NoBorrow>(
+  value: Signal(ResourceState(A, E))
+): Resource(A, E) {
+  Resource { value: value }
+}
+pub fn state<A: Shared + NoBorrow, E: Shared + NoBorrow>(
+  r: Resource(A, E)
+): ResourceState(A, E) ! {rt} { get(r.value) }
+pub fn resolved_resource<A: Shared + NoBorrow, E: Shared + NoBorrow>(value: A): Resource(
+  A,
+  E
+) ! {rt} {
+  resource_handle(signal(Ready(value)))
+}
+pub fn failed_resource<A: Shared + NoBorrow, E: Shared + NoBorrow>(error: E): Resource(A, E) ! {rt} {
+  resource_handle(signal(Failed(error)))
+}
+// A host/task/display handler decides how to wait. Resuming means the state changed;
+// read checks it again and never mistakes a spurious wakeup for a result.
+pub(open) effect resource_wait<A: Shared + NoBorrow, E: Shared + NoBorrow>(
+  resource: Resource(A, E)
+): Unit
+pub(open) effect resource_cancelled(): Never resume 0
+pub fn read<A: Shared + NoBorrow, E: Shared + NoBorrow>(
+  r: Resource(A, E)
+): A ! {rt, div, resource_wait(A, E), resource_cancelled, fail(E), overflow} {
+  match state(r) {
+    Ready(value) => value
+    Failed(error) => perform fail(error)
+    Cancelled => perform resource_cancelled()
+    Pending => { perform resource_wait(r); read(r) }
+  }
+}
+pub fn join<A: Shared + NoBorrow, B: Shared + NoBorrow, E: Shared + NoBorrow>(
+  a: Resource(A, E),
+  b: Resource(B, E)
+): Resource(A × B, E) ! {rt, div} {
+  let result := signal(Pending)
+  watch(() => match peek(result) {
+    Pending => {
+      let next := match state(a) {
+        Failed(e) => Failed(e)
+        Cancelled => Cancelled
+        Ready(x) => match state(b) {
+          Failed(e) => Failed(e)
+          Cancelled => Cancelled
+          Ready(y) => Ready(#(x, y))
+          Pending => Pending
+        }
+        Pending => match state(b) {
+          Failed(e) => Failed(e)
+          Cancelled => Cancelled
+          Ready(_) => Pending
+          Pending => Pending
+        }
+      }
+      match next {
+        Pending => #()
+        Ready(v) => set(result, Ready(v))
+        Failed(e) => set(result, Failed(e))
+        Cancelled => set(result, Cancelled)
+      }
+    }
+    Ready(_) => #()
+    Failed(_) => #()
+    Cancelled => #()
+  })
+  resource_handle(result)
+}
+// Winner is latched at the first observed terminal outcome; shared losers are untouched.
+pub(open) enum Selected(A: Type, B: Type) { First(A), Second(B) }
+pub fn select<A: Shared + NoBorrow, B: Shared + NoBorrow, E: Shared + NoBorrow>(
+  a: Resource(A, E),
+  b: Resource(B, E)
+): Resource(Selected(A, B), E) ! {rt, div} {
+  let result := signal(Pending)
+  watch(() => match peek(result) {
+    Pending => match state(a) {
+      Ready(x) => set(result, Ready(First(x)))
+      Failed(e) => set(result, Failed(e))
+      Cancelled => set(result, Cancelled)
+      Pending => match state(b) {
+        Ready(y) => set(result, Ready(Second(y)))
+        Failed(e) => set(result, Failed(e))
+        Cancelled => set(result, Cancelled)
+        Pending => #()
+      }
+    }
+    Ready(_) => #()
+    Failed(_) => #()
+    Cancelled => #()
+  })
+  resource_handle(result)
+}

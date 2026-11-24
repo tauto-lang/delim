@@ -1,0 +1,90 @@
+import "../../src/handle.taut" {
+  Resource,
+  ResourceState,
+  Selected,
+  failed_resource,
+  join,
+  read,
+  resolved_resource,
+  resource_cancelled,
+  resource_handle,
+  resource_wait,
+  select,
+  state
+}
+import "../../src/signal.taut" { Signal, batch, reactive, set, signal }
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("handle", () => {
+  assert_case("read handles successful values", reactive(() => {
+    let h: Resource(u64, Text) := resolved_resource(42)
+    handle { read(h) == 42 } with {
+      resource_wait<u64, Text>(r), k => false
+      resource_cancelled() => false
+      fail<Text>(e) => false
+      return result => result
+    }
+  }))
+  assert_case("read resumes only after state is settled", reactive(() => {
+    let value: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let h := resource_handle(value)
+    handle { read(h) == 7 } with {
+      resource_wait<u64, Text>(r), k => { set(value, Ready(7)); k(#()) }
+      resource_cancelled() => false
+      fail<Text>(e) => false
+      return result => result
+    }
+  }))
+  assert_case("read preserves typed failure", reactive(() => {
+    let h: Resource(u64, u64) := failed_resource(9)
+    handle { read(h) == 0 } with {
+      resource_wait<u64, u64>(r), k => false
+      resource_cancelled() => false
+      fail<u64>(e) => e == 9
+      return result => result
+    }
+  }))
+  assert_case("join waits for both and never cancels a shared input", reactive(() => {
+    let a: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let b: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let combined := join(resource_handle(a), resource_handle(b))
+    set(a, Ready(3))
+    let waiting := match state(combined) { Pending => true, Ready(_) => false, Failed(_) => false, Cancelled => false }
+    set(b, Ready(4))
+    waiting && match state(combined) { Ready(p) => p.fst == 3 && p.snd == 4, Pending => false, Failed(_) => false, Cancelled => false }
+  }))
+  assert_case("select latches the first observed outcome", reactive(() => {
+    let a: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let b: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let winner := select(resource_handle(a), resource_handle(b))
+    set(b, Ready(2))
+    set(a, Ready(1))
+    match state(winner) { Ready(Second(2)) => true, Ready(Second(_)) => false, Ready(First(_)) => false, Pending => false, Failed(_) => false, Cancelled => false }
+  }))
+  assert_case("cancellation remains separate from failure", reactive(() => {
+    let value: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Cancelled)
+    handle { read(resource_handle(value)) == 0 } with {
+      resource_wait<u64, Text>(r), k => false
+      resource_cancelled() => true
+      fail<Text>(e) => false
+      return result => result
+    }
+  }))
+
+  assert_case("join preserves its first failure when another input fails later", reactive(() => {
+    let a: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let b: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let combined := join(resource_handle(a), resource_handle(b))
+    set(b, Failed("first"))
+    set(a, Failed("later"))
+    match state(combined) { Failed("first") => true, Failed(_) => false, Pending => false, Ready(_) => false, Cancelled => false }
+  }))
+  assert_case("select prioritizes the left when a batch settles both inputs", reactive(() => {
+    let a: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let b: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+    let winner := select(resource_handle(a), resource_handle(b))
+    batch(() => { set(b, Ready(2)); set(a, Ready(1)) })
+    match state(winner) { Ready(First(1)) => true, Ready(First(_)) => false, Ready(Second(_)) => false, Pending => false, Failed(_) => false, Cancelled => false }
+  }))
+})

@@ -1,0 +1,856 @@
+import std::builtin::os { hash_seed }
+import std::hashmap { HashMap }
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+import "signal.taut" {
+  Signal,
+  batch,
+  dispose,
+  get,
+  hold,
+  in_owner,
+  memo,
+  memo_eq,
+  on_cleanup,
+  own,
+  peek,
+  release,
+  rt,
+  run_held,
+  scope,
+  untracked,
+  watch
+}
+
+// The element layer: elements, their properties and events, and the nodes whose shape
+// changes (`show`, `switch_on`, `keyed_each`). It does not draw. It keeps a retained tree of
+// numbered nodes and appends each change to a list of patches, which a renderer (the DOM,
+// a native toolkit, or the headless one in this file) applies. `K` is the type of element
+// kinds and `P` the type of properties of that renderer.
+
+// A node of the retained tree. Only `Tree` hands out numbers, and a number is not reused.
+pub(open) struct(shared) Node { id: u32 }
+
+// The kind of an event a handler is registered for.
+pub(open) enum EventKind {
+  Press
+  Focus
+  Blur
+  Key
+  // The text of an input field was committed.
+  Edit
+  PointerEnter
+  PointerLeave
+  PointerDown
+  PointerMove
+  PointerUp
+  Scroll
+  // A form was submitted; the page does not navigate.
+  Submit
+  // A named action, such as one an assistive technology asks for.
+  NamedAction(Text)
+  // A drag of an element the renderer was told is a drag source: it has moved far enough to
+  // be a drag (`DragStart`, with where it started), it moves (`DragMove`), and it ends
+  // (`DragEnd`), each delivered to the source with the pointer's position. Where it was let
+  // go, the node under the pointer gets `Drop` first.
+  DragStart
+  DragMove
+  DragEnd
+  Drop
+  // A key was let go, with the key it names.
+  KeyUp
+  // Two presses in quick succession.
+  DoubleClick
+  // The context menu was asked for, as by a right press; the browser's own menu still opens.
+  ContextMenu
+  // The wheel turned, with how far across and down (`ScrollData`).
+  Wheel
+  // Text was pasted, with the plain text pasted (`TextData`).
+  Paste
+}
+
+// What came with an event: the key, the committed text, the pointer's position and button,
+// or the scroll amount.
+pub(open) enum EventData {
+  NoData
+  KeyData(Text)
+  TextData(Text)
+  Pointer(i64, i64, i64)
+  ScrollData(i64, i64)
+}
+
+// The text an event committed (`TextData`), or the key it names (`KeyData`); else "".
+pub fn event_text(d: EventData): Text {
+  match d {
+    TextData(s) => s,
+    KeyData(s) => s,
+    NoData => "",
+    Pointer(_, _, _) => "",
+    ScrollData(_, _) => ""
+  }
+}
+
+// A property of an element: fixed, following the signals its function reads, or a handler.
+// A handler only reads and writes signals; work that waits goes through a store's jobs.
+pub(open) enum Prop(P: Type) {
+  Static(P)
+  Dyn(() -> P ! {rt, div})
+  On(EventKind, (d: EventData) -> Unit ! {rt, div})
+  // A handler the signal runtime keeps, by the id `hold` gave; it reads the event's data
+  // with `current_event`. The node takes it over: it is released when the node's owner ends.
+  Held(EventKind, u64)
+}
+
+// The changes to the retained tree, in the order a renderer applies them.
+//
+// - A node is created detached, by `Create`, `CreateText` or `CreateGroup`, and numbered once.
+// - `Append` and `InsertBefore` on a node that already has a parent move it.
+// - `Remove` detaches a node with all of its subtree, and every node in it is dead: no patch
+//   names it again. Only the root of what was removed gets a `Remove`, not its descendants.
+// - A group has no box of its own; its children stand in its place in its parent.
+pub(open) enum Patch(K: Type, P: Type) {
+  Create(Node, K)
+  CreateText(Node, Text)
+  // A node with no box of its own, standing for the nodes `show`, `switch_on` and `keyed_each`
+  // put in it.
+  CreateGroup(Node)
+  SetProp(Node, P)
+  SetText(Node, Text)
+  // Puts `child` last among the children of `parent`.
+  Append(Node, Node)
+  // Puts `child` right before `before`, a child of `parent`.
+  InsertBefore(Node, Node, Node)
+  Remove(Node)
+  // The subtree under the node, made by `template`, has the shape every other instance of
+  // the template has: a renderer may build the first one and copy it for the others.
+  Template(u64, Node)
+}
+
+// A handler of the tree: its function is kept by the signal runtime under `held`, and reads
+// the event's data from the tree's `event`, so that the tree holds no function.
+struct Handler { node: u32, kind: EventKind, held: u64 }
+
+pub(open) struct(shared) Tree(K: Shared + NoBorrow, P: Shared + NoBorrow) {
+  next: Ref(u32),
+  patches: Ref(List(Patch(K, P))),
+  handlers: Ref(List(Handler)),
+  // The data of the event being delivered.
+  event: Ref(EventData),
+  // The resources still loading under each suspense boundary being built, innermost first.
+  boundaries: Ref(List(delim::src::signal::Signal(u64))),
+  duplicate_keys: Ref(List(u64))
+}
+
+pub fn tree<K: Shared + NoBorrow, P: Shared + NoBorrow>(): Tree(K, P) ! {ref_new} {
+  Tree {
+    next: perform ref_new(1),
+    patches: perform ref_new(Nil),
+    handlers: perform ref_new(Nil),
+    event: perform ref_new(NoData),
+    boundaries: perform ref_new(Nil),
+    duplicate_keys: perform ref_new(Nil)
+  }
+}
+
+pub fn node_of<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P)
+): Node ! {overflow, ref_get, ref_set} {
+  let n := perform ref_get(t.next)
+  perform ref_set(t.next, n + 1)
+  Node { id: n }
+}
+
+pub fn emit<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  p: Patch(K, P)
+): Unit ! {ref_get, ref_set} {
+  perform ref_set(t.patches, Cons(p, perform ref_get(t.patches)))
+}
+
+fn reverse_patches<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  l: List(Patch(K, P)),
+  acc: List(Patch(K, P))
+): List(Patch(K, P)) {
+  match l {
+    Nil => acc
+    Cons(p, rest) => reverse_patches(rest, Cons(p, acc))
+  }
+}
+
+// The patches since the last call, oldest first.
+pub fn take_patches<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P)
+): List(Patch(K, P)) ! {ref_get, ref_set} {
+  let ps := perform ref_get(t.patches)
+  perform ref_set(t.patches, Nil)
+  reverse_patches(ps, Nil)
+}
+
+fn kind_code(k: EventKind): u64 {
+  match k {
+    Press => 0
+    Focus => 1
+    Blur => 2
+    Key => 3
+    Edit => 4
+    PointerEnter => 5
+    PointerLeave => 6
+    PointerDown => 7
+    PointerMove => 8
+    PointerUp => 9
+    Scroll => 10
+    NamedAction(x) => 11
+    Submit => 12
+    DragStart => 13
+    DragMove => 14
+    DragEnd => 15
+    Drop => 16
+    KeyUp => 17
+    DoubleClick => 18
+    ContextMenu => 19
+    Wheel => 20
+    Paste => 21
+  }
+}
+
+fn action_name(k: EventKind): Text {
+  match k {
+    Press => ""
+    Focus => ""
+    Blur => ""
+    Key => ""
+    Edit => ""
+    PointerEnter => ""
+    PointerLeave => ""
+    PointerDown => ""
+    PointerMove => ""
+    PointerUp => ""
+    Scroll => ""
+    Submit => ""
+    DragStart => ""
+    DragMove => ""
+    DragEnd => ""
+    Drop => ""
+    KeyUp => ""
+    DoubleClick => ""
+    ContextMenu => ""
+    Wheel => ""
+    Paste => ""
+    NamedAction(x) => x
+  }
+}
+
+fn same_kind(a: EventKind, b: EventKind): Bool ! {div} {
+  kind_code(a) == kind_code(b) && action_name(a) == action_name(b)
+}
+
+fn run_handlers(l: List(Handler), n: u32, k: EventKind): Unit ! {rt, div} {
+  match l {
+    Nil => #()
+    Cons(h, rest) => {
+      if h.node == n && same_kind(h.kind, k) { run_held(h.held) } else { #() }
+      run_handlers(rest, n, k)
+    }
+  }
+}
+
+// Delivers an event to the handlers of the node, oldest first, as one batch: the watchers
+// the handlers make stale run once, after the last handler.
+// The data of the event the tree is delivering now.
+pub fn current_event<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P)
+): EventData ! {ref_get} {
+  perform ref_get(t.event)
+}
+
+pub fn fire<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  n: Node,
+  k: EventKind,
+  d: EventData
+): Unit ! {rt, div} {
+  let hs := reverse_handlers(perform ref_get(t.handlers), Nil)
+  perform ref_set(t.event, d)
+  batch(() => run_handlers(hs, n.id, k))
+}
+
+// Whether an event of the kind goes from the node it happened on up to the nearest node that
+// has a handler for it, as the DOM's events bubble: a press, a key, an edit, a submit, a
+// pointer going down, moving or up, a named action, a drop, a key let go, a double press, a
+// context menu, a wheel turn and a paste. A renderer that knows the
+// parents of its nodes finds that node with `handler_nodes`; other events go to the node.
+pub fn bubbles(k: EventKind): Bool ! {div} {
+  let c := kind_code(k)
+  c == 0 || c == 3 || c == 4 || c == 7 || c == 8 || c == 9 || c == 11 || c == 12 || c >= 16
+}
+
+// The nodes that have a handler for events of the kind.
+pub fn handler_nodes<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  k: EventKind
+): List(u32) ! {div, ref_get} {
+  nodes_for(perform ref_get(t.handlers), k, Nil)
+}
+
+fn nodes_for(l: List(Handler), k: EventKind, acc: List(u32)): List(u32) ! {div} {
+  match l {
+    Nil => acc
+    Cons(h, rest) => nodes_for(rest, k, if same_kind(h.kind, k) { Cons(h.node, acc) } else { acc })
+  }
+}
+
+fn reverse_handlers(l: List(Handler), acc: List(Handler)): List(Handler) {
+  match l {
+    Nil => acc
+    Cons(h, rest) => reverse_handlers(rest, Cons(h, acc))
+  }
+}
+
+fn drop_handler(l: List(Handler), held: u64): List(Handler) {
+  match l {
+    Nil => Nil
+    Cons(h, rest) => if h.held == held { rest } else {
+      Cons(h, drop_handler(rest, held))
+    }
+  }
+}
+
+// Removes the subtree root when the current owner ends. Each handler is separately
+// owned by the scope that registered it, including handlers on descendant nodes.
+fn remove_on_cleanup<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  n: Node
+): Unit ! {rt} {
+  on_cleanup(() => {
+    emit(t, Remove(n))
+  })
+}
+
+fn add_handler<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  n: Node,
+  e: EventKind,
+  held: u64
+): Unit ! {rt} {
+  perform ref_set(
+    t.handlers,
+    Cons(Handler { node: n.id, kind: e, held: held }, perform ref_get(t.handlers))
+  )
+  // A node inside a part that ends is not removed itself (only the part's root is),
+  // so each handler is forgotten when the owner it was made under ends.
+  let handlers := t.handlers
+  on_cleanup(() => {
+    release(held)
+    perform ref_set(handlers, drop_handler(perform ref_get(handlers), held))
+  })
+}
+
+fn apply_props<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  n: Node,
+  props: List(Prop(P))
+): Unit ! {rt, div, overflow} where DecEq(P) {
+  match props {
+    Nil => #()
+    Cons(p, rest) => {
+      match p {
+        Static(v) => emit(t, SetProp(n, v))
+        Dyn(f) => {
+          let v := memo_eq(() => f())
+          watch(() => emit(t, SetProp(n, get(v))))
+        }
+        On(e, h) => {
+          let event := t.event
+          add_handler(t, n, e, hold(() => h(perform ref_get(event))))
+        }
+        Held(e, held) => add_handler(t, n, e, held)
+      }
+      apply_props(t, n, rest)
+    }
+  }
+}
+
+fn append_all<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  parent: Node,
+  children: List(Node)
+): Unit ! {ref_get, ref_set} {
+  match children {
+    Nil => #()
+    Cons(c, rest) => {
+      emit(t, Append(parent, c))
+      append_all(t, parent, rest)
+    }
+  }
+}
+
+// An element of kind `kind`. Its children are fixed; the parts whose shape changes are
+// `show`, `switch_on` and `keyed_each` nodes among them.
+pub fn el<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  kind: K,
+  props: List(Prop(P)),
+  children: List(Node)
+): Node ! {rt, div, overflow} where DecEq(P) {
+  let n := node_of(t)
+  emit(t, Create(n, kind))
+  apply_props(t, n, props)
+  append_all(t, n, children)
+  n
+}
+
+// A group has no layout box; DOM/HTML keep a display:contents element for it.
+pub fn fragment<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  children: List(Node)
+): Node ! {overflow, ref_get, ref_set} {
+  let n := node_of(t)
+  emit(t, CreateGroup(n))
+  append_all(t, n, children)
+  n
+}
+
+pub fn text<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  s: Text
+): Node ! {overflow, ref_get, ref_set} {
+  let n := node_of(t)
+  emit(t, CreateText(n, s))
+  n
+}
+
+// Text that follows the signals `f` reads.
+pub fn text_dyn<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  f: () -> Text ! {rt, div}
+): Node ! {rt, div, overflow} {
+  let n := node_of(t)
+  let v := memo_eq(() => f())
+  emit(t, CreateText(n, peek(v)))
+  // The first run only subscribes: the text was created with the value.
+  let first := perform ref_new(true)
+  watch(() => {
+    let s := get(v)
+    if perform ref_get(first) { perform ref_set(first, false) } else { emit(t, SetText(n, s)) }
+  })
+  n
+}
+
+// `build()` while `cond()` holds, nothing otherwise. What `build` made ends when the
+// condition turns false.
+pub fn show<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  cond: () -> Bool ! {rt, div},
+  build: () -> Node ! {rt, div}
+): Node ! {rt, div, overflow} {
+  let g := node_of(t)
+  emit(t, CreateGroup(g))
+  let c := memo_eq(() => cond())
+  watch(() => {
+    if get(c) {
+      let n := untracked(() => build())
+      emit(t, Append(g, n))
+      remove_on_cleanup(t, n)
+    } else { #() }
+  })
+  g
+}
+
+// `build(v)` for the value `v` of `f()`, made again only when the value changes.
+pub fn switch_on<K: Shared + NoBorrow, P: Shared + NoBorrow, V: Shared + NoBorrow>(
+  t: Tree(K, P),
+  f: () -> V ! {rt, div},
+  build: (V) -> Node ! {rt, div}
+): Node ! {rt, div, overflow} where DecEq(V) {
+  let g := node_of(t)
+  emit(t, CreateGroup(g))
+  let v := memo_eq(() => f())
+  watch(() => {
+    let x := get(v)
+    let n := untracked(() => build(x))
+    emit(t, Append(g, n))
+    remove_on_cleanup(t, n)
+  })
+  g
+}
+
+// Like `switch_on`, without comparing values: what `f` reads changing builds again, even to the
+// same value. It is what `@match` makes, so a handle (whose value cannot be compared) picks its
+// branch too; wrap `f` in `memo_eq` to build again only for a different value.
+pub fn switch_on_change<K: Shared + NoBorrow, P: Shared + NoBorrow, V: Shared + NoBorrow>(
+  t: Tree(K, P),
+  f: () -> V ! {rt, div},
+  build: (V) -> Node ! {rt, div}
+): Node ! {rt, div, overflow} {
+  let g := node_of(t)
+  emit(t, CreateGroup(g))
+  watch(() => {
+    let x := f()
+    let n := untracked(() => build(x))
+    emit(t, Append(g, n))
+    remove_on_cleanup(t, n)
+  })
+  g
+}
+
+// ---- each ---------------------------------------------------------------------------------
+
+// A row of `keyed_each`: its key, the owner of what it made, and its node.
+struct(shared) KeyedRow { key: u64, owner: u64, node: Node }
+
+// The rows by key, so finding the row of a key does not walk the rows.
+fn rows_by_key(m: &mut HashMap(u64, KeyedRow), rows: List(KeyedRow)): Unit {
+  match rows {
+    Nil => #()
+    Cons(r, rest) => {
+      let old := HashMap::insert(&mut m, r.key, r)
+      rows_by_key(&mut m, rest)
+    }
+  }
+}
+
+fn find_row(m: &HashMap(u64, KeyedRow), k: u64): Option(KeyedRow) {
+  match HashMap::get(&m, &k) {
+    None => None
+    Some(r) => Some(own(&r))
+  }
+}
+
+// The keys of `items`, so a row asks whether its key stays without walking the items.
+fn keys_of<A: Shared + NoBorrow>(
+  m: &mut HashMap(u64, u64),
+  l: List(A),
+  key: (A) -> u64 ! {div}
+): Unit ! {div} {
+  match l {
+    Nil => #()
+    Cons(x, rest) => {
+      put(&mut m, key(x), 0)
+      keys_of(&mut m, rest, key)
+    }
+  }
+}
+
+fn reverse_rows(l: List(KeyedRow), acc: List(KeyedRow)): List(KeyedRow) {
+  match l {
+    Nil => acc
+    Cons(r, rest) => reverse_rows(rest, Cons(r, acc))
+  }
+}
+
+// Ends the rows whose key is not among `keys`.
+fn end_missing<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  rows: List(KeyedRow),
+  keys: &HashMap(u64, u64)
+): Unit ! {rt, div, overflow} {
+  match rows {
+    Nil => #()
+    Cons(r, rest) => {
+      if has_seen(&keys, r.key) { #() } else {
+        dispose(r.owner)
+        emit(t, Remove(r.node))
+      }
+      end_missing(t, rest, &keys)
+    }
+  }
+}
+
+// The rows for `items` in order, keeping the row of a key that was there before and making
+// the others; newest first.
+fn has_seen(m: &HashMap(u64, u64), k: u64): Bool {
+  match at(&m, k) {
+    None => false
+    Some(v) => true
+  }
+}
+
+fn key_reported(keys: List(u64), k: u64): Bool {
+  match keys {
+    Nil => false
+    Cons(x, rest) => x == k || key_reported(rest, k)
+  }
+}
+
+// Duplicate keys since the last call, once per key, newest first. Rendering still keeps
+// the first item, so diagnostics do not change the existing reconciliation contract.
+pub fn take_duplicate_keys<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P)
+): List(u64) ! {ref_get, ref_set} {
+  let keys := perform ref_get(t.duplicate_keys)
+  perform ref_set(t.duplicate_keys, Nil)
+  keys
+}
+
+// An item whose key an earlier item already has is left out: one key, one row.
+fn rows_for<A: Shared + NoBorrow>(
+  old: &HashMap(u64, KeyedRow),
+  items: List(A),
+  key: (A) -> u64 ! {div},
+  row: (A) -> Node ! {rt, div},
+  duplicates: Ref(List(u64)),
+  seen: &mut HashMap(u64, u64),
+  acc: List(KeyedRow)
+): List(KeyedRow) ! {rt, div} {
+  match items {
+    Nil => acc
+    Cons(x, rest) => {
+      let k := key(x)
+      if has_seen(&seen, k) {
+        let reported := perform ref_get(duplicates)
+        if key_reported(reported, k) { #() } else { perform ref_set(duplicates, Cons(k, reported)) }
+        rows_for(&old, rest, key, row, duplicates, &mut seen, acc)
+      } else {
+        put(&mut seen, k, 0)
+        let r := match find_row(&old, k) {
+          Some(r) => r
+          None => {
+            let made := scope(() => untracked(() => row(x)))
+            KeyedRow { key: k, owner: made.owner, node: made.value }
+          }
+        }
+        rows_for(&old, rest, key, row, duplicates, &mut seen, Cons(r, acc))
+      }
+    }
+  }
+}
+
+fn append_rows<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  g: Node,
+  rows: List(KeyedRow)
+): Unit ! {ref_get, ref_set} {
+  match rows {
+    Nil => #()
+    Cons(r, rest) => {
+      emit(t, Append(g, r.node))
+      append_rows(t, g, rest)
+    }
+  }
+}
+
+fn index_rows(m: &mut HashMap(u64, u64), rows: List(KeyedRow), i: u64): Unit ! {overflow} {
+  match rows {
+    Nil => #()
+    Cons(r, rest) => {
+      let old := HashMap::insert(&mut m, r.key, i)
+      index_rows(&mut m, rest, i + 1)
+    }
+  }
+}
+
+fn at(m: &HashMap(u64, u64), k: u64): Option(u64) {
+  match HashMap::get(&m, &k) {
+    None => None
+    Some(v) => Some(own(&v))
+  }
+}
+
+fn put(m: &mut HashMap(u64, u64), k: u64, v: u64): Unit {
+  let old := HashMap::insert(&mut m, k, v)
+}
+
+// The positions in `rows` that stay where they are: a longest run of rows whose old
+// positions increase. Every other row is moved, so the number of moves is the least.
+fn staying(
+  old: List(KeyedRow),
+  rows: List(KeyedRow)
+): HashMap(u64, u64) ! {div, overflow, hash_seed} {
+  var old_at: HashMap(u64, u64) := HashMap::new()
+  index_rows(&mut old_at, old, 0)
+  // seq: the new position → the old position, for the rows that were there before.
+  var seq: HashMap(u64, u64) := HashMap::new()
+  var n: u64 := 0
+  var rest := rows
+  var going := true
+  while going {
+    match rest {
+      Nil => { going := false }
+      Cons(r, more) => {
+        match at(&old_at, r.key) {
+          None => #()
+          Some(o) => put(&mut seq, n, o)
+        }
+        n := n + 1
+        rest := more
+      }
+    }
+  }
+  // Patience sorting: tails(l) is the new position ending the best run of length l + 1.
+  var tails: HashMap(u64, u64) := HashMap::new()
+  var prev: HashMap(u64, u64) := HashMap::new()
+  var len: u64 := 0
+  var i: u64 := 0
+  while i < n {
+    match at(&seq, i) {
+      None => #()
+      Some(v) => {
+        var lo: u64 := 0
+        var hi: u64 := len
+        while lo < hi {
+          let mid := div(lo + hi, 2)
+          let tv := match at(&tails, mid) {
+            None => 0
+            Some(p) => match at(&seq, p) {
+              None => 0
+              Some(x) => x
+            }
+          }
+          if tv < v { lo := mid + 1 } else { hi := mid }
+        }
+        if lo > 0 {
+          match at(&tails, lo - 1) {
+            None => #()
+            Some(p) => put(&mut prev, i, p)
+          }
+        } else { #() }
+        put(&mut tails, lo, i)
+        if lo == len { len := len + 1 } else { #() }
+      }
+    }
+    i := i + 1
+  }
+  var keep: HashMap(u64, u64) := HashMap::new()
+  if len > 0 {
+    var cur := at(&tails, len - 1)
+    var walking := true
+    while walking {
+      match cur {
+        None => { walking := false }
+        Some(p) => {
+          put(&mut keep, p, 1)
+          cur := at(&prev, p)
+        }
+      }
+    }
+  } else { #() }
+  keep
+}
+
+fn reverse_indexed(
+  l: List(KeyedRow),
+  i: u64,
+  acc: List(u64 × KeyedRow)
+): List(u64 × KeyedRow) ! {overflow} {
+  match l {
+    Nil => acc
+    Cons(r, rest) => reverse_indexed(rest, i + 1, Cons(#(i, r), acc))
+  }
+}
+
+// Puts the rows of `g` in the order of `rows`, from the last one back, moving only the rows
+// that are not staying.
+fn place_rows<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  g: Node,
+  back: List(u64 × KeyedRow),
+  keep: &HashMap(u64, u64),
+  anchor: Option(Node)
+): Unit ! {div, ref_get, ref_set} {
+  match back {
+    Nil => #()
+    Cons(p, rest) => {
+      match at(&keep, (p: u64)) {
+        Some(x) => #()
+        None => match anchor {
+          None => emit(t, Append(g, (p: KeyedRow).node))
+          Some(a) => emit(t, InsertBefore(g, (p: KeyedRow).node, a))
+        }
+      }
+      place_rows(t, g, rest, &keep, Some((p: KeyedRow).node))
+    }
+  }
+}
+
+// A node per item of `items()`, matched by `key`: an item whose key was there before keeps
+// its node and what it made; a new key gets `row(item)`; a key that left ends with its node.
+// Of items with the same key, only the first gets a row. After a change only the rows
+// outside a longest run that kept its order are moved.
+pub fn keyed_each<K: Shared + NoBorrow, P: Shared + NoBorrow, A: Shared + NoBorrow>(
+  t: Tree(K, P),
+  items: () -> List(A) ! {rt, div},
+  key: (A) -> u64 ! {div},
+  row: (A) -> Node ! {rt, div}
+): Node ! {rt, div, overflow} {
+  let g := node_of(t)
+  emit(t, CreateGroup(g))
+  let rows := perform ref_new(Nil)
+  // The rows belong to the owner `keyed_each` was made in, not to the watcher, so a change of
+  // `items` keeps the rows it keeps.
+  let home := scope(() => #())
+  watch(() => {
+    let xs := items()
+    let old := perform ref_get(rows)
+    var keys: HashMap(u64, u64) := HashMap::new()
+    keys_of(&mut keys, xs, key)
+    end_missing(t, old, &keys)
+    let fresh := reverse_rows(in_owner(home.owner, () => {
+      var by_key: HashMap(u64, KeyedRow) := HashMap::new()
+      rows_by_key(&mut by_key, old)
+      var seen: HashMap(u64, u64) := HashMap::new()
+      rows_for(&by_key, xs, key, row, t.duplicate_keys, &mut seen, Nil)
+    }), Nil)
+    perform ref_set(rows, fresh)
+    match old {
+      Nil => append_rows(t, g, fresh)
+      Cons(o, more) => {
+        let keep := staying(old, fresh)
+        place_rows(t, g, reverse_indexed(fresh, 0, Nil), &keep, None)
+      }
+    }
+  })
+  on_cleanup(() => dispose(home.owner))
+  g
+}
+
+// `build()`, marked as an instance of the template `id`: every call with the same `id` must
+// make the same elements with the same static properties, differing only in text and in
+// followed properties.
+pub fn template<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  id: u64,
+  build: () -> Node ! {rt, div}
+): Node ! {rt, div} {
+  let n := build()
+  emit(t, Template(id, n))
+  n
+}
+
+// What a row of `keyed_each_signal` may be keyed by: a `Nat` or a `u64`.
+pub class RowKey(R: Type) {
+  fn row_key(r: R): Nat
+}
+instance RowKey(Nat) {
+  fn row_key(r: Nat): Nat { r }
+}
+instance RowKey(u64) {
+  fn row_key(r: u64): Nat { Nat::of_u64(r) }
+}
+
+// Like keyed_each, with a live value per retained key. The row is built once; use get(item)
+// in text_dyn or Dyn to follow changes without losing focus, handlers or row-local state.
+pub fn keyed_each_signal<K: Shared + NoBorrow, P: Shared + NoBorrow, A: Shared + NoBorrow, R>(
+  t: Tree(K, P),
+  items: () -> List(A) ! {rt, div},
+  key_by: (A) -> R ! {div},
+  row: (delim::src::signal::Signal(A)) -> Node ! {rt, div}
+): Node ! {rt, div, overflow} where RowKey(R) {
+  let key := (a: A) => U64::of_nat(RowKey::row_key(key_by(a)))
+  let values := memo(items)
+  keyed_each(t, () => get(values), key, (initial: A) => {
+    let k := key(initial)
+    let item := memo(() => item_for_key(get(values), key, k, initial))
+    row(item)
+  })
+}
+
+fn item_for_key<A: Shared + NoBorrow>(
+  xs: List(A),
+  key: (A) -> u64 ! {div},
+  k: u64,
+  fallback: A
+): A ! {div} {
+  match xs {
+    Nil => fallback
+    Cons(x, rest) => if key(x) == k { x } else { item_for_key(rest, key, k, fallback) }
+  }
+}

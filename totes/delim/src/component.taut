@@ -1,0 +1,37 @@
+import "signal.taut" { on_cleanup, rt }
+import "tree.taut" { Node, Patch, Tree, emit, node_of }
+
+// Conventions for components. A component is a function from its props and its children
+// (`List(Node)`) to a `Node`; what it needs from around it shows in its effect row:
+// `rt` for signals, `context(A)` for a context (`context.taut`), `fail(Text)` for an error
+// an `error_boundary` above it can catch.
+
+// `body()`, or `fallback(why)` if `body` fails with `fail(why)` before it returns. The
+// nodes `body` made before failing were never put anywhere, so none of them is shown.
+pub fn error_boundary_in<K: Shared + NoBorrow, P: Shared + NoBorrow, !e>(
+  t: Tree(K, P),
+  body: () -> Node ! {rt, div, fail(Text)} ∪ e,
+  fallback: (Text) -> Node ! {rt, div} ∪ e
+): Node ! {rt, div} ∪ e {
+  handle { body() } with {
+    fail<Text>(why) => fallback(why)
+    return n => n
+  }
+}
+
+// Puts what `body` builds under `target`, another node (a modal layer, say), instead of
+// where the portal stands, and takes it away when the portal's owner ends. The portal itself
+// leaves an empty group in its place. Events of the moved nodes reach their handlers as for
+// any node: handlers belong to the tree, not to the place.
+pub fn portal<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  target: Node,
+  body: () -> Node ! {rt, div}
+): Node ! {rt, div, overflow} {
+  let g := node_of(t)
+  emit(t, CreateGroup(g))
+  let n := body()
+  emit(t, Append(target, n))
+  on_cleanup(() => emit(t, Remove(n)))
+  g
+}

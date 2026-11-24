@@ -1,0 +1,265 @@
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+import "signal.taut" {
+  Load,
+  Signal,
+  Want,
+  batch,
+  current,
+  get,
+  memo,
+  on_cleanup,
+  rt,
+  set,
+  signal,
+  untracked,
+  update,
+  watch
+}
+import "tree.taut" { Node, Patch, Tree, emit, node_of, show }
+
+// Resources and suspense. A resource is text named by a key, which the renderer loads with
+// what the program gives it: on the server, `render_html_loading`'s `load`; in the browser,
+// the loader set on the DOM host. Its value is text so that what the server loaded can be
+// sent to the browser as it is.
+
+fn reverse_wants(l: List(Want), acc: List(Want)): List(Want) {
+  match l {
+    Nil => acc
+    Cons(w, rest) => reverse_wants(rest, Cons(w, acc))
+  }
+}
+
+// The resources asked for since the last call, oldest first. The renderer loads each and
+// gives the result to `resolve`.
+pub fn take_wants(): List(Want) ! {rt} {
+  let r := current()
+  let ws := perform ref_get(r.wants)
+  perform ref_set(r.wants, Nil)
+  reverse_wants(ws, Nil)
+}
+
+// The resource named `key`, loading until the renderer resolves it. Under `suspense`, the
+// boundary shows its fallback until this and its other resources are loaded.
+pub fn resource<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  key: Text
+): delim::src::signal::Signal(Load) ! {rt, div} {
+  let s := signal(Loading)
+  let b := match perform ref_get(t.boundaries) {
+    Nil => None
+    Cons(c, rest) => {
+      update(c, (n: u64) => handle { n + 1 } with { overflow() => n })
+      Some(c)
+    }
+  }
+  let r := current()
+  perform ref_set(
+    r.wants,
+    Cons(
+      Want { key: key, state: s, boundary: b, settled: perform ref_new(false) },
+      perform ref_get(r.wants)
+    )
+  )
+  s
+}
+
+// The resource named `key`, outside any suspense boundary: for what is asked for after the
+// view is built, such as by a handler.
+pub fn request(key: Text): delim::src::signal::Signal(Load) ! {rt, div} {
+  let s := signal(Loading)
+  let r := current()
+  perform ref_set(
+    r.wants,
+    Cons(
+      Want { key: key, state: s, boundary: None, settled: perform ref_new(false) },
+      perform ref_get(r.wants)
+    )
+  )
+  s
+}
+
+// Only the first of `resolve` and `reject` counts: a second would let the boundary go on
+// while another of its resources still loads.
+fn settle(w: Want, l: Load): Unit ! {rt, div} {
+  if perform ref_get(w.settled) { #() } else {
+    perform ref_set(w.settled, true)
+    batch(() => {
+      set(w.state, l)
+      match w.boundary {
+        None => #()
+        Some(c) => update(c, (n: u64) => handle { n - 1 } with { overflow() => 0 })
+      }
+    })
+  }
+}
+
+pub fn resolve(w: Want, v: Text): Unit ! {rt, div} { settle(w, Loaded(v)) }
+
+pub fn reject(w: Want, why: Text): Unit ! {rt, div} { settle(w, LoadFailed(why)) }
+
+// `body()`, once every resource it asked for while being built has loaded, and `fallback()`
+// until then, and again while one loads again. The body is built at once, so its resources are asked for at once, but put in
+// place only when they are loaded.
+pub fn suspense_in<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P),
+  fallback: () -> Node ! {rt, div},
+  body: () -> Node ! {rt, div}
+): Node ! {rt, div, overflow} {
+  let g := node_of(t)
+  emit(t, CreateGroup(g))
+  let waiting := signal(0)
+  let outer := perform ref_get(t.boundaries)
+  perform ref_set(t.boundaries, Cons(waiting, outer))
+  let b := body()
+  perform ref_set(t.boundaries, outer)
+  let shown := perform ref_new(false)
+  // The fallback is shown again whenever a resource of the boundary loads again (a
+  // `reloadable_in`'s `reload`), above the body, which stays as it was until then.
+  let f := show(t, () => get(waiting) > 0, fallback)
+  emit(t, Append(g, f))
+  watch(() => if get(waiting) == 0 && not(perform ref_get(shown)) {
+    perform ref_set(shown, true)
+    emit(t, Append(g, b))
+  } else { #() })
+  g
+}
+
+// What a typed resource has: nothing yet, its value, or why it has none.
+pub(open) enum Fetched(A: Type) {
+  Fetching
+  FetchedOk(A)
+  FetchFailed(Text)
+}
+
+// `s` read as `A` by `decode`. A text `decode` refuses is `Failed`, not a wrong value.
+pub fn decoded<A: Shared + NoBorrow>(
+  s: delim::src::signal::Signal(Load),
+  decode: (Text) -> Option(A) ! {div}
+): delim::src::signal::Signal(Fetched(A)) ! {rt, div} {
+  memo(() => match get(s) {
+    Loading => Fetching
+    LoadFailed(why) => FetchFailed(why)
+    Loaded(v) => match decode(v) {
+      Some(a) => FetchedOk(a)
+      None => FetchFailed("the resource did not read back")
+    }
+  })
+}
+
+// The resource named `key`, read as `A` by `decode` (a codec's `decode` fits). It counts for
+// the suspense boundary like `resource`.
+pub fn resource_as<K: Shared + NoBorrow, P: Shared + NoBorrow, A: Shared + NoBorrow>(
+  t: Tree(K, P),
+  key: Text,
+  decode: (Text) -> Option(A) ! {div}
+): delim::src::signal::Signal(Fetched(A)) ! {rt, div} {
+  decoded(resource(t, key), decode)
+}
+
+// Like `request`, read as `A`: for a handler to ask for what it needs.
+pub fn request_as<A: Shared + NoBorrow>(
+  key: Text,
+  decode: (Text) -> Option(A) ! {div}
+): delim::src::signal::Signal(Fetched(A)) ! {rt, div} {
+  decoded(request(key), decode)
+}
+
+// Runs `f` once, with the value, when `s` becomes `Ready`; nothing runs if it fails. This is
+// how a handler waits: it asks with `request_as` and hands the rest of its work to
+// `on_ready`, so the handler itself never suspends and its effects stay `rt` and `Div`.
+pub fn on_ready<A: Shared + NoBorrow>(
+  s: delim::src::signal::Signal(Fetched(A)),
+  f: (A) -> Unit ! {rt, div}
+): Unit ! {rt, div, overflow} {
+  let done := perform ref_new(false)
+  watch(() => match get(s) {
+    FetchedOk(a) => if perform ref_get(done) { #() } else {
+      perform ref_set(done, true)
+      untracked(() => f(a))
+    }
+    Fetching => #()
+    FetchFailed(why) => #()
+  })
+}
+
+// A repeatable request. Every load uses a fresh Want but writes the same signal. Settling
+// the previous Want before replacing it prevents late responses from overwriting the new one.
+// One made by `reloadable_in` counts for the suspense boundary it was made under while a load
+// is pending, so that boundary shows its fallback again on `reload`.
+pub struct(shared) Reloadable {
+  state: delim::src::signal::Signal(Load),
+  pending: Ref(Option(Ref(Bool))),
+  active: Ref(Bool),
+  boundary: Option(delim::src::signal::Signal(u64))
+}
+
+// Ends the pending load, if any, without its result: its response is dropped when it comes,
+// and the boundary stops waiting for it. Whether it ended unsettled.
+fn drop_pending(r: Reloadable): Bool ! {rt, div} {
+  match perform ref_get(r.pending) {
+    None => false
+    Some(settled) => {
+      perform ref_set(r.pending, None)
+      if perform ref_get(settled) { false } else {
+        perform ref_set(settled, true)
+        match r.boundary {
+          None => #()
+          Some(c) => update(c, (n: u64) => handle { n - 1 } with { overflow() => 0 })
+        }
+        true
+      }
+    }
+  }
+}
+
+fn reloadable_with(boundary: Option(delim::src::signal::Signal(u64))): Reloadable ! {rt, div} {
+  let r := Reloadable {
+    state: signal(Loading),
+    pending: perform ref_new(None),
+    active: perform ref_new(true),
+    boundary: boundary
+  }
+  on_cleanup(() => {
+    perform ref_set(r.active, false)
+    let dropped := drop_pending(r)
+    #()
+  })
+  r
+}
+
+pub fn reloadable(): Reloadable ! {rt, div} { reloadable_with(None) }
+
+// A reloadable that counts for the innermost suspense boundary `t` is building, if any.
+pub fn reloadable_in<K: Shared + NoBorrow, P: Shared + NoBorrow>(
+  t: Tree(K, P)
+): Reloadable ! {rt, div} {
+  reloadable_with(match perform ref_get(t.boundaries) {
+    Nil => None
+    Cons(c, rest) => Some(c)
+  })
+}
+
+pub fn resource_state(r: Reloadable): delim::src::signal::Signal(Load) { r.state }
+
+pub fn cancel_resource(r: Reloadable): Unit ! {rt, div} {
+  if drop_pending(r) { set(r.state, LoadFailed("resource cancelled")) } else { #() }
+}
+
+pub fn reload(r: Reloadable, key: Text): Unit ! {rt, div} {
+  if not(perform ref_get(r.active)) { #() } else {
+    batch(() => {
+      // Retain only the response token, not the Want and its signal.
+      let dropped := drop_pending(r)
+      let settled := perform ref_new(false)
+      let w := Want { key: key, state: r.state, boundary: r.boundary, settled: settled }
+      perform ref_set(r.pending, Some(settled))
+      match r.boundary {
+        None => #()
+        Some(c) => update(c, (n: u64) => handle { n + 1 } with { overflow() => n })
+      }
+      let runtime := current()
+      perform ref_set(runtime.wants, Cons(w, perform ref_get(runtime.wants)))
+      set(r.state, Loading)
+    })
+  }
+}

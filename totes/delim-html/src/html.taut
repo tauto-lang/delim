@@ -1,0 +1,917 @@
+import std::hashmap { HashMap }
+import "../../delim/src/common.taut" { Vocab }
+import "safe.taut" { Escape, TrustedHtml, checked_bytes }
+import "../../delim/src/signal.taut" {
+  Runtime,
+  Want,
+  alone_with,
+  cells,
+  current,
+  own,
+  reactive,
+  rt,
+  with_runtime
+}
+import "../../delim/src/tree.taut" { Node, Patch, Tree, el, take_patches, tree }
+import std::builtin::par { Mutex, Ref, mutex_new, ref_get, ref_new, ref_set, wait }
+import "markup.taut" {
+  Attr,
+  HtmlAttr,
+  HtmlKind,
+  bytes_of,
+  decimal,
+  starts_with,
+  tag_refused,
+  text_of_byte_list,
+  trusted_text,
+  web_vocab,
+  written_tag
+}
+import "write.taut" { HTree, written_all }
+import "../../delim/src/resource.taut" { reject, resolve, take_wants }
+import "ui.taut" { Delim, with_ui }
+
+// The HTML renderer, for rendering on the server and ahead of time: it applies the patches
+// to a tree of its own and writes the tree out as HTML.
+
+struct(shared) HNode {
+  // The tag name; empty for a text node.
+  tag: Text,
+  text: Text,
+  // Whether `text` is HTML written as it is, from a `TrustedHtml`, instead of the children.
+  raw: Bool,
+  attrs: List(@name Text × @value Text),
+  // Newest first, so that appending a child takes one step.
+  children: List(u32)
+}
+
+struct(shared) Html {
+  nodes: Mutex(HashMap(u32, HNode)),
+  parents: Mutex(HashMap(u32, u32)),
+  // Whether each node carries its number, for the DOM renderer to hydrate.
+  marked: Bool,
+  // Whether each group carries its number in `data-g`, for a streamed page to fill it later.
+  grouped: Bool
+}
+
+fn html_doc(marked: Bool): Html ! {cells} {
+  Html {
+    nodes: perform mutex_new(HashMap::new()),
+    parents: perform mutex_new(HashMap::new()),
+    marked: marked,
+    grouped: false
+  }
+}
+
+fn hnode(h: Html, n: u32): Option(HNode) ! {cells, wait} {
+  alone_with(h.nodes, (m) => match HashMap::get(&m, &n) {
+    None => None
+    Some(x) => Some(own(&x))
+  })
+}
+
+fn put_hnode(h: Html, n: u32, x: HNode): Unit ! {cells, wait} {
+  alone_with(h.nodes, (m) => {
+    HashMap::insert(&mut m, n, x)
+    #()
+  })
+}
+
+fn parent_of(h: Html, n: u32): Option(u32) ! {cells, wait} {
+  alone_with(h.parents, (m) => match HashMap::get(&m, &n) {
+    None => None
+    Some(p) => Some(own(&p))
+  })
+}
+
+fn set_parent(h: Html, n: u32, p: u32): Unit ! {cells, wait} {
+  alone_with(h.parents, (m) => {
+    HashMap::insert(&mut m, n, p)
+    #()
+  })
+}
+
+fn with_hnode(
+  h: Html,
+  n: u32,
+  f: (x: HNode) -> HNode ! {div, overflow}
+): Unit ! {wait, div, overflow, cells} {
+  match hnode(h, n) {
+    None => #()
+    Some(x) => put_hnode(h, n, f(x))
+  }
+}
+
+fn without_attr(
+  l: List(@name Text × @value Text),
+  k: Text
+): List(@name Text × @value Text) ! {div, overflow} {
+  match l {
+    Nil => Nil
+    Cons(a, rest) => {
+      let name: Text := (a: @name Text)
+      if name == k { without_attr(rest, k) } else { Cons(a, without_attr(rest, k)) }
+    }
+  }
+}
+
+fn put_attr(h: Html, n: u32, k: Text, v: Text): Unit ! {wait, div, overflow, cells} {
+  with_hnode(h, n, (x: HNode) => HNode {
+    tag: x.tag,
+    text: x.text,
+    raw: x.raw,
+    attrs: Cons(#(@name k, @value v), without_attr(x.attrs, k)),
+    children: x.children
+  })
+}
+
+fn clear_attr(h: Html, n: u32, k: Text): Unit ! {wait, div, overflow, cells} {
+  with_hnode(h, n, (x: HNode) => HNode {
+    tag: x.tag,
+    text: x.text,
+    raw: x.raw,
+    attrs: without_attr(x.attrs, k),
+    children: x.children
+  })
+}
+
+fn set_children(h: Html, n: u32, cs: List(u32)): Unit ! {wait, div, overflow, cells} {
+  with_hnode(
+    h,
+    n,
+    (x: HNode) => HNode { tag: x.tag, text: x.text, raw: x.raw, attrs: x.attrs, children: cs }
+  )
+}
+
+fn children_of(h: Html, n: u32): List(u32) ! {cells, wait} {
+  match hnode(h, n) {
+    None => Nil
+    Some(x) => x.children
+  }
+}
+
+fn without_child(l: List(u32), c: u32): List(u32) ! {div, overflow} {
+  match l {
+    Nil => Nil
+    Cons(x, rest) => if x == c { rest } else { Cons(x, without_child(rest, c)) }
+  }
+}
+
+// `c` placed before `b` in the children `l`, which are newest first: after `b` in `l`. With no
+// `b`, `c` comes last, which is first in `l`.
+fn before_child(l: List(u32), c: u32, b: u32): List(u32) ! {div, overflow} {
+  match after_child(l, c, b) {
+    Some(m) => m
+    None => Cons(c, l)
+  }
+}
+
+fn after_child(l: List(u32), c: u32, b: u32): Option(List(u32)) ! {div, overflow} {
+  match l {
+    Nil => None
+    Cons(x, rest) => if x == b { Some(Cons(x, Cons(c, rest))) } else {
+      match after_child(rest, c, b) {
+        Some(m) => Some(Cons(x, m))
+        None => None
+      }
+    }
+  }
+}
+
+fn reversed(l: List(u32), acc: List(u32)): List(u32) {
+  match l {
+    Nil => acc
+    Cons(x, rest) => reversed(rest, Cons(x, acc))
+  }
+}
+
+fn detach(h: Html, c: u32): Unit ! {wait, div, overflow, cells} {
+  match parent_of(h, c) {
+    None => #()
+    Some(p) => set_children(h, p, without_child(children_of(h, p), c))
+  }
+}
+
+fn bool_attr(h: Html, n: u32, name: Text, b: Bool): Unit ! {wait, div, overflow, cells} {
+  if b { put_attr(h, n, name, "") } else { clear_attr(h, n, name) }
+}
+
+fn html_attr(h: Html, n: u32, a: HtmlAttr): Unit ! {wait, div, overflow, cells} {
+  match a {
+    // An attribute `Attr::refused` names is not written.
+    Attr(k, v) => match Attr::refused(k, v) {
+      None => put_attr(h, n, k, v)
+      Some(why) => #()
+    }
+    Aria(role, l) => {
+      put_attr(h, n, "role", role)
+      if l == "" { #() } else { put_attr(h, n, "aria-label", l) }
+    }
+    Value(v) => put_attr(h, n, "value", v)
+    Disabled(b) => bool_attr(h, n, "disabled", b)
+    Checked(b) => bool_attr(h, n, "checked", b)
+    Selected(b) => bool_attr(h, n, "selected", b)
+    Multiple(b) => bool_attr(h, n, "multiple", b)
+    Hidden(b) => bool_attr(h, n, "hidden", b)
+    Required(b) => bool_attr(h, n, "required", b)
+    ReadOnly(b) => bool_attr(h, n, "readonly", b)
+    OptionalAttr(k, v) => match v {
+      None => clear_attr(h, n, k)
+      Some(text) => html_attr(h, n, Attr(k, text))
+    }
+    // Not written: `html_safe` has no SVG and no `style`, and a drag needs the DOM.
+    SvgAttr(k, v) => #()
+    Var(k, v) => #()
+    DragSource(b) => #()
+  }
+}
+
+fn html_apply(h: Html, ps: List(Patch(HtmlKind, HtmlAttr))): Unit ! {wait, div, overflow, cells} {
+  match ps {
+    Nil => #()
+    Cons(p, rest) => {
+      match p {
+        Create(n, k) => match k {
+          // A refused tag is written as an element that shows nothing.
+          Tag(tag) => put_hnode(
+            h,
+            n.id,
+            HNode {
+              tag: written_tag(tag),
+              text: "",
+              raw: false,
+              attrs: match tag_refused(tag) {
+                None => Nil
+                Some(why) => Cons(#(@name "hidden", @value ""), Nil)
+              },
+              children: Nil
+            }
+          )
+          Island(name, props, inner) => put_hnode(
+            h,
+            n.id,
+            HNode {
+              tag: "delim-island",
+              // Written as it is, not escaped.
+              text: trusted_text(inner),
+              raw: true,
+              attrs: Cons(
+                #(@name "data-props", @value props),
+                Cons(#(@name "data-name", @value name), Nil)
+              ),
+              children: Nil
+            }
+          )
+          // SVG is not written (`html_safe` has none): it shows nothing, as a refused tag.
+          Svg(tag) => put_hnode(
+            h,
+            n.id,
+            HNode {
+              tag: "delim-refused",
+              text: "",
+              raw: false,
+              attrs: Cons(#(@name "hidden", @value ""), Nil),
+              children: Nil
+            }
+          )
+          Trusted(html) => put_hnode(
+            h,
+            n.id,
+            HNode {
+              tag: "delim-trusted",
+              // Written as it is, not escaped: a `TrustedHtml` vouches for it.
+              text: trusted_text(html),
+              raw: true,
+              attrs: Cons(#(@name "style", @value "display:contents"), Nil),
+              children: Nil
+            }
+          )
+        }
+        CreateText(n, s) => put_hnode(
+          h,
+          n.id,
+          HNode { tag: "", text: s, raw: false, attrs: Nil, children: Nil }
+        )
+        // A group is written as the element the DOM renderer uses for it, so that the page
+        // and the DOM built over it have the same shape.
+        CreateGroup(n) => put_hnode(
+          h,
+          n.id,
+          HNode {
+            tag: "delim-group",
+            text: "",
+            raw: false,
+            attrs: Cons(#(@name "style", @value "display:contents"), Nil),
+            children: Nil
+          }
+        )
+        SetProp(n, a) => html_attr(h, n.id, a)
+        SetText(n, s) => with_hnode(
+          h,
+          n.id,
+          (x: HNode) => HNode {
+            tag: x.tag,
+            text: s,
+            raw: x.raw,
+            attrs: x.attrs,
+            children: x.children
+          }
+        )
+        Append(parent, c) => {
+          detach(h, c.id)
+          set_children(h, parent.id, Cons(c.id, children_of(h, parent.id)))
+          set_parent(h, c.id, parent.id)
+        }
+        InsertBefore(parent, c, b) => {
+          detach(h, c.id)
+          set_children(h, parent.id, before_child(children_of(h, parent.id), c.id, b.id))
+          set_parent(h, c.id, parent.id)
+        }
+        Remove(n) => detach(h, n.id)
+        Template(id, n) => #()
+      }
+      html_apply(h, rest)
+    }
+  }
+}
+
+// ---- writing ------------------------------------------------------------------------------
+
+// `t` as HTML that shows it, in text or an attribute value: `&`, `<`, `>` and `"` escaped, as
+// `Escape::html` of `safe.taut`.
+pub fn escape_text(t: Text): Text ! {div, overflow} { text_of_byte_list(Escape::html(bytes_of(t))) }
+
+pub module Escape {
+  pub fn attr(t: Text): Text ! {div, overflow} { escape_text(t) }
+}
+
+fn bytes_pairs(
+  l: List(@name Text × @value Text),
+  acc: List(@name List(Nat) × @value List(Nat))
+): List(@name List(Nat) × @value List(Nat)) ! {div, overflow} {
+  match l {
+    Nil => acc
+    Cons(a, rest) => bytes_pairs(
+      rest,
+      Cons(#(@name bytes_of((a: @name Text)), @value bytes_of((a: @value Text))), acc)
+    )
+  }
+}
+
+fn trees_onto(l: List(HTree), m: List(HTree)): List(HTree) ! {div, overflow} {
+  match l {
+    Nil => m
+    Cons(x, rest) => Cons(x, trees_onto(rest, m))
+  }
+}
+
+fn trees_of(h: Html, l: List(u32)): List(HTree) ! {wait, div, overflow, cells} {
+  match l {
+    Nil => Nil
+    Cons(c, rest) => trees_onto(tree_of(h, c), trees_of(h, rest))
+  }
+}
+
+fn attr_value(attrs: List(@name Text × @value Text), name: Text): Option(Text) {
+  match attrs {
+    Nil => None
+    Cons(a, rest) => {
+      let k: Text := (a: @name Text)
+      let v: Text := (a: @value Text)
+      if k == name { Some(v) } else { attr_value(rest, name) }
+    }
+  }
+}
+
+fn option_text(h: Html, cs: List(u32)): Text ! {wait, div, overflow, cells} {
+  match cs {
+    Nil => ""
+    Cons(n, rest) => match hnode(h, n) {
+      None => option_text(h, rest)
+      Some(x) => concat(
+        if x.tag == "" { x.text } else { option_text(h, reversed(x.children, Nil)) },
+        option_text(h, rest)
+      )
+    }
+  }
+}
+
+// Value on a select selects the first matching option, including options in optgroups.
+fn select_options(
+  h: Html,
+  cs: List(u32),
+  value: Text,
+  found: Ref(Bool)
+): Unit ! {wait, div, overflow, cells} {
+  match cs {
+    Nil => #()
+    Cons(n, rest) => {
+      match hnode(h, n) {
+        None => #()
+        Some(x) => if x.tag == "option" {
+          let v := match attr_value(x.attrs, "value") {
+            Some(v) => v
+            None => option_text(h, reversed(x.children, Nil))
+          }
+          let selected := not(perform ref_get(found)) && v == value
+          bool_attr(h, n, "selected", selected)
+          if selected { perform ref_set(found, true) } else { #() }
+        } else { select_options(h, reversed(x.children, Nil), value, found) }
+      }
+      select_options(h, rest, value, found)
+    }
+  }
+}
+
+// The node `n` as the trees `write.taut` writes. When the document is marked, a text node
+// follows a comment with its number, which also keeps two texts apart, and an element
+// carries its number in `data-b`.
+fn tree_of(h: Html, n: u32): List(HTree) ! {wait, div, overflow, cells} {
+  match hnode(h, n) {
+    None => Nil
+    Some(x) => {
+      let id := decimal(U64::of_u32(n))
+      if x.tag == "" {
+        if h.marked { Cons(HMark(bytes_of(id)), Cons(HText(bytes_of(x.text)), Nil)) } else {
+          Cons(HText(bytes_of(x.text)), Nil)
+        }
+      } else {
+        // The attributes were put newest first; they are written oldest first, then the mark.
+        let marks := if h.grouped && x.tag == "delim-group" {
+          Cons(#(@name "data-g", @value id), x.attrs)
+        } else { x.attrs }
+        let attrs := bytes_pairs(
+          if h.marked { Cons(#(@name "data-b", @value id), marks) } else { marks },
+          Nil
+        )
+        let tag := bytes_of(x.tag)
+        if x.tag == "select" {
+          match attr_value(x.attrs, "value") {
+            None => #()
+            Some(v) => select_options(h, reversed(x.children, Nil), v, perform ref_new(false))
+          }
+        } else { #() }
+        if x.tag == "textarea" {
+          match attr_value(x.attrs, "value") {
+            None => Cons(HEl(tag, attrs, trees_of(h, reversed(x.children, Nil))), Nil)
+            Some(v) => {
+              // HTML parsing discards one initial newline in a textarea.
+              let content := if starts_with(v, "\n") { concat("\n", v) } else { v }
+              Cons(HEl(tag, attrs, Cons(HText(bytes_of(content)), Nil)), Nil)
+            }
+          }
+        } else if x.raw {
+          // The text of a `TrustedHtml`, checked again: the node keeps it as text.
+          match checked_bytes(bytes_of(x.text)) {
+            Some(t) => Cons(HRaw(tag, attrs, t), Nil)
+            None => Cons(HEl(tag, attrs, Nil), Nil)
+          }
+        } else { Cons(HEl(tag, attrs, trees_of(h, reversed(x.children, Nil))), Nil) }
+      }
+    }
+  }
+}
+
+// The HTML `view` makes, before any event: what the server sends, or what is written to a
+// file ahead of time.
+pub fn render_html_in(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow}
+): Text ! {wait, div, overflow, cells} {
+  trusted_text(render_with(html_doc(false), draw))
+}
+
+// The HTML `app`, which takes its tree from `ui`, makes before any event.
+pub fn render_html(app: () -> Node ! {Delim}): Text ! {wait, div, overflow, cells} {
+  render_html_in((t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => with_ui(t, v, app))
+}
+
+fn render_with(
+  h: Html,
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow}
+): TrustedHtml ! {wait, div, overflow, cells} {
+  render_loading(h, draw, false, (keys: List(Text)) => Nil)
+}
+
+// The keys of `ws`, in order.
+fn want_keys(ws: List(Want)): List(Text) {
+  match ws {
+    Nil => Nil
+    Cons(w, rest) => Cons(w.key, want_keys(rest))
+  }
+}
+
+// Each key given to `load` in turn: the answers of a `loads` that loads one at a time.
+fn each_loaded<!e>(
+  keys: List(Text),
+  load: (key: Text) -> Result(Text, Text) ! {div, overflow} ∪ e
+): List(Result(Text, Text)) ! {div, overflow} ∪ e {
+  match keys {
+    Nil => Nil
+    Cons(k, rest) => {
+      let r := load(k)
+      Cons(r, each_loaded(rest, load))
+    }
+  }
+}
+
+// Settles each of `ws` with the answer at the same place in `rs`. A want with no answer, as
+// when the loader stopped waiting for it, is rejected.
+fn settle_all(ws: List(Want), rs: List(Result(Text, Text))): Unit ! {rt, div, overflow} {
+  match ws {
+    Nil => #()
+    Cons(w, rest) => match rs {
+      Nil => {
+        reject(w, "the loader gave no answer")
+        settle_all(rest, Nil)
+      }
+      Cons(r, more) => {
+        match r {
+          Ok(v) => resolve(w, v)
+          Err(why) => reject(w, why)
+        }
+        settle_all(rest, more)
+      }
+    }
+  }
+}
+
+// Loads what the view asks for until it asks for nothing more. The resources asked for in
+// one step are given to `loads` together, so that a server can load them at once.
+fn load_until_done<!e>(
+  t: Tree(HtmlKind, HtmlAttr),
+  loads: (keys: List(Text)) -> List(Result(Text, Text)) ! {div, overflow} ∪ e
+): Unit ! {rt, div, overflow} ∪ e {
+  match take_wants() {
+    Nil => #()
+    Cons(first, more) => {
+      let ws := Cons(first, more)
+      settle_all(ws, loads(want_keys(ws)))
+      load_until_done(t, loads)
+    }
+  }
+}
+
+fn render_loading<!e>(
+  h: Html,
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow},
+  loading: Bool,
+  loads: (keys: List(Text)) -> List(Result(Text, Text)) ! {div, overflow} ∪ e
+): TrustedHtml ! {wait, div, overflow, cells} ∪ e {
+  let t := tree()
+  let root := reactive(() => {
+    let n := draw(t, web_vocab())
+    if loading { load_until_done(t, loads) } else { #() }
+    n
+  })
+  html_apply(h, take_patches(t))
+  // `write_safe` proves that `html_safe` accepts it, whatever the view made.
+  written_all(tree_of(h, root.id))
+}
+
+// `render_html` with every resource loaded by `load` first, and the resources those ask for
+// in turn: the page is written as it is once nothing is loading.
+pub fn render_html_loading<!e>(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow},
+  load: (key: Text) -> Result(Text, Text) ! {div, overflow} ∪ e
+): Text ! {wait, div, overflow, cells} ∪ e {
+  render_html_loading_together(draw, (keys: List(Text)) => each_loaded(keys, load))
+}
+
+// `render_html_loading` with the resources asked for at once given to `loads` together, which
+// answers each in the same place: a server can load them at the same time, and stop waiting
+// for a slow one. A key it gives no answer for is rejected.
+pub fn render_html_loading_together<!e>(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow},
+  loads: (keys: List(Text)) -> List(Result(Text, Text)) ! {div, overflow} ∪ e
+): Text ! {wait, div, overflow, cells} ∪ e {
+  trusted_text(render_loading(html_doc(false), draw, true, loads))
+}
+
+// ---- streaming ----------------------------------------------------------------------------
+
+// What one step of loading changed, as written before the step: the groups whose content is
+// to be sent again, and whether something outside every group changed, so that the whole view
+// is.
+struct(shared) Changed {
+  groups: List(u32),
+  whole: Bool
+}
+
+fn with_group(l: List(u32), g: u32): List(u32) ! {div, overflow} {
+  match l {
+    Nil => Cons(g, Nil)
+    Cons(x, rest) => if x == g { l } else { Cons(x, with_group(rest, g)) }
+  }
+}
+
+// The group already written that holds what changes at `n`, walking up from `n`. A node made
+// in this step is not written yet, and what is under it is sent with whatever holds it.
+fn changed_at(h: Html, root: u32, n: u32, c: Changed): Changed ! {wait, div, overflow, cells} {
+  match hnode(h, n) {
+    None => c
+    Some(x) => if x.tag == "delim-group" {
+      Changed { groups: with_group(c.groups, n), whole: c.whole }
+    } else if n == root { Changed { groups: c.groups, whole: true } } else {
+      match parent_of(h, n) {
+        None => c
+        Some(p) => changed_at(h, root, p, c)
+      }
+    }
+  }
+}
+
+fn changed_by(
+  h: Html,
+  root: u32,
+  ps: List(Patch(HtmlKind, HtmlAttr)),
+  c: Changed
+): Changed ! {wait, div, overflow, cells} {
+  match ps {
+    Nil => c
+    Cons(p, rest) => changed_by(h, root, rest, match p {
+      Append(parent, x) => changed_at(h, root, parent.id, c)
+      InsertBefore(parent, x, b) => changed_at(h, root, parent.id, c)
+      Remove(n) => match parent_of(h, n.id) {
+        None => c
+        Some(q) => changed_at(h, root, q, c)
+      }
+      SetText(n, s) => changed_at(h, root, n.id, c)
+      SetProp(n, a) => changed_at(h, root, n.id, c)
+      CreateGroup(_) => c
+      Create(_, _) => c
+      CreateText(_, _) => c
+      Template(_, _) => c
+    })
+  }
+}
+
+fn has_group(l: List(u32), g: u32): Bool {
+  match l {
+    Nil => false
+    Cons(x, rest) => x == g || has_group(rest, g)
+  }
+}
+
+fn under_any(h: Html, gs: List(u32), n: u32): Bool ! {wait, div, overflow, cells} {
+  match parent_of(h, n) {
+    None => false
+    Some(p) => has_group(gs, p) || under_any(h, gs, p)
+  }
+}
+
+// The groups of `gs` not inside another of them, whose content is sent with that one's.
+fn outermost(h: Html, gs: List(u32), l: List(u32)): List(u32) ! {wait, div, overflow, cells} {
+  match l {
+    Nil => Nil
+    Cons(g, rest) => if under_any(h, gs, g) { outermost(h, gs, rest) } else {
+      Cons(g, outermost(h, gs, rest))
+    }
+  }
+}
+
+fn group_parts(h: Html, gs: List(u32)): Text ! {wait, div, overflow, cells} {
+  match gs {
+    Nil => ""
+    Cons(g, rest) => {
+      let inner := written_all(trees_of(h, reversed(children_of(h, g), Nil)))
+      concat(
+        concat(
+          concat(concat("<template data-for=\"", decimal(U64::of_u32(g))), "\">"),
+          concat(trusted_text(inner), "</template>")
+        ),
+        group_parts(h, rest)
+      )
+    }
+  }
+}
+
+// What `render_html_streaming` asks of `io`: the resource of a key, or that a part be sent.
+// One function does both, so that both run with the same effects.
+pub(open) enum(shared) Stream {
+  Fetch(Text),
+  Part(Text)
+}
+
+// One resource loaded, with its place among the keys asked for together.
+pub(open) struct(shared) LoadAnswer { index: u64, got: Result(Text, Text) }
+
+// The steps run outside the runtime, with each step's work in it by `with_runtime`, so that
+// no closure in the runtime holds `io`.
+fn stream_steps<!e>(
+  h: Html,
+  t: Tree(HtmlKind, HtmlAttr),
+  r: Runtime,
+  root: u32,
+  start: (keys: List(Text)) -> Unit ! {wait, div, overflow} ∪ e,
+  next: () -> Option(LoadAnswer) ! {wait, div, overflow} ∪ e,
+  io: (s: Stream) -> Result(Text, Text) ! {wait, div, overflow} ∪ e,
+  whole: Bool
+): Option(Bool) ! {wait, div, overflow, cells} ∪ e {
+  match with_runtime(r, () => take_wants()) {
+    Nil => Some(whole)
+    Cons(first, more) => {
+      let ws := Cons(first, more)
+      let state := perform ref_new(Some(whole))
+      start(want_keys(ws))
+      stream_answers(h, t, r, root, ws, next, io, state)
+      // What the loader stopped waiting for is rejected, and that change is sent too.
+      stream_settled(h, t, r, root, () => reject_unsettled(ws), io, state)
+      match perform ref_get(state) {
+        None => None
+        Some(w) => stream_steps(h, t, r, root, start, next, io, w)
+      }
+    }
+  }
+}
+
+// Sends what each answer of `next` changes, until it has no more or `io` refuses a part.
+fn stream_answers<!e>(
+  h: Html,
+  t: Tree(HtmlKind, HtmlAttr),
+  r: Runtime,
+  root: u32,
+  ws: List(Want),
+  next: () -> Option(LoadAnswer) ! {wait, div, overflow} ∪ e,
+  io: (s: Stream) -> Result(Text, Text) ! {wait, div, overflow} ∪ e,
+  state: Ref(Option(Bool))
+): Unit ! {wait, div, overflow, cells} ∪ e {
+  match next() {
+    None => #()
+    Some(a) => {
+      let going := match want_at(ws, a.index) {
+        None => true
+        Some(w) => if perform ref_get(w.settled) { true } else {
+          stream_settled(h, t, r, root, () => match a.got {
+            Ok(v) => resolve(w, v)
+            Err(why) => reject(w, why)
+          }, io, state)
+        }
+      }
+      if going { stream_answers(h, t, r, root, ws, next, io, state) } else { #() }
+    }
+  }
+}
+
+fn want_at(ws: List(Want), i: u64): Option(Want) ! {overflow} {
+  match ws {
+    Nil => None
+    Cons(w, rest) => if i == 0 { Some(w) } else { want_at(rest, i - 1) }
+  }
+}
+
+fn reject_unsettled(ws: List(Want)): Unit ! {rt, div, overflow} {
+  match ws {
+    Nil => #()
+    Cons(w, rest) => {
+      if perform ref_get(w.settled) { #() } else { reject(w, "the loader gave no answer") }
+      reject_unsettled(rest)
+    }
+  }
+}
+
+// Runs `settle` in the runtime and sends what it changed. `state` is whether the whole view is
+// to be sent again, or None once `io` refused a part; the answer is whether to go on.
+fn stream_settled<!e>(
+  h: Html,
+  t: Tree(HtmlKind, HtmlAttr),
+  r: Runtime,
+  root: u32,
+  settle: () -> Unit ! {rt, div, overflow},
+  io: (s: Stream) -> Result(Text, Text) ! {wait, div, overflow} ∪ e,
+  state: Ref(Option(Bool))
+): Bool ! {wait, div, overflow, cells} ∪ e {
+  match perform ref_get(state) {
+    None => false
+    Some(whole) => {
+      with_runtime(r, settle)
+      let ps := take_patches(t)
+      let c := changed_by(h, root, ps, Changed { groups: Nil, whole: whole })
+      html_apply(h, ps)
+      // Once the whole view is to be sent again, groups are not sent one by one.
+      let going := if c.whole { true } else {
+        match c.groups {
+          Nil => true
+          Cons(first, more) => {
+            let gs := Cons(first, more)
+            sent(io, group_parts(h, outermost(h, gs, gs)))
+          }
+        }
+      }
+      perform ref_set(state, if going { Some(c.whole) } else { None })
+      going
+    }
+  }
+}
+
+// The keys `start` was last given, each fetched from `io` in turn by `next`.
+fn fetched_next<!e>(
+  queue: Ref(List(Text)),
+  at: Ref(u64),
+  io: (s: Stream) -> Result(Text, Text) ! {wait, div, overflow} ∪ e
+): Option(LoadAnswer) ! {wait, div, overflow, cells} ∪ e {
+  match perform ref_get(queue) {
+    Nil => None
+    Cons(k, rest) => {
+      perform ref_set(queue, rest)
+      let i := perform ref_get(at)
+      perform ref_set(at, i + 1)
+      Some(LoadAnswer { index: i, got: io(Fetch(k)) })
+    }
+  }
+}
+
+fn sent<!e>(
+  io: (s: Stream) -> Result(Text, Text) ! {wait, div, overflow} ∪ e,
+  part: Text
+): Bool ! {wait, div, overflow} ∪ e {
+  match io(Part(part)) {
+    Ok(u) => true
+    Err(why) => false
+  }
+}
+
+struct StreamView { root: Node, runtime: Runtime }
+
+// `render_html_loading` in parts, each given to `io` as a `Part` as soon as it is ready: first the view
+// with every suspense boundary showing its fallback, then, each time a resource loads, a
+// `<template data-for>` with the new content of each boundary it changed, to put in the
+// element of the same `data-g`. If a resource changes something outside every boundary, the
+// whole view is sent last instead, as `<template data-for="app">`. An `Err` for a part stops the
+// loading. `io` answers a `Fetch` as `render_html_loading`'s `load`.
+pub fn render_html_streaming<!e>(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow},
+  io: (s: Stream) -> Result(Text, Text) ! {div, overflow} ∪ e
+): Unit ! {wait, div, overflow, cells} ∪ e {
+  let queue := perform ref_new(Nil)
+  let at := perform ref_new(0)
+  render_html_streaming_together(
+    draw,
+    (keys: List(Text)) => {
+      perform ref_set(queue, keys)
+      perform ref_set(at, 0)
+    },
+    () => fetched_next(queue, at, (s: Stream) => io(s)),
+    (s: Stream) => io(s)
+  )
+}
+
+// `render_html_streaming` with the resources asked for at once given to `start` together
+// instead of to `io` one by one: a server can load them at the same time, send each
+// boundary as soon as its resources are there, and stop waiting for a slow one. `next` gives
+// the next answer for the keys `start` was last given, in any order, or None once it gives no
+// more; a key it gave no answer for is rejected. `io` is given only `Part`s.
+pub fn render_html_streaming_together<!e>(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow},
+  start: (keys: List(Text)) -> Unit ! {wait, div, overflow} ∪ e,
+  next: () -> Option(LoadAnswer) ! {wait, div, overflow} ∪ e,
+  io: (s: Stream) -> Result(Text, Text) ! {wait, div, overflow} ∪ e
+): Unit ! {wait, div, overflow, cells} ∪ e {
+  let h := Html {
+    nodes: perform mutex_new(HashMap::new()),
+    parents: perform mutex_new(HashMap::new()),
+    marked: false,
+    grouped: true
+  }
+  let t := tree()
+  let made := reactive(() => StreamView { root: draw(t, web_vocab()), runtime: current() })
+  let root := made.root.id
+  html_apply(h, take_patches(t))
+  if sent(io, trusted_text(written_all(tree_of(h, root)))) {
+    if stream_steps(h, t, made.runtime, root, start, next, io, false) == Some(true) {
+      sent(
+        io,
+        concat(
+          concat("<template data-for=\"app\">", trusted_text(written_all(tree_of(h, root)))),
+          "</template>"
+        )
+      )
+      #()
+    } else { #() }
+  } else { #() }
+}
+
+// An island in a page rendered on the server: `view(props)` rendered in a tree of its own,
+// with each node's number, which the browser's `hydrate` of the same view and `props` takes
+// over. `props` is all the island starts from, as text.
+pub fn island(
+  t: Tree(HtmlKind, HtmlAttr),
+  name: Text,
+  props: Text,
+  draw: (
+    t: Tree(HtmlKind, HtmlAttr),
+    v: Vocab(HtmlKind, HtmlAttr),
+    props: Text
+  ) -> Node ! {rt, div, overflow}
+): Node ! {rt, div, overflow} {
+  let inner := render_with(
+    html_doc(true),
+    (t2: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => draw(t2, v, props)
+  )
+  el(t, Island(name, props, inner), Nil, Nil)
+}
+
+// HTML written into the page as it is, in a `<delim-trusted>` element that does not change
+// the layout. Only a `TrustedHtml` is taken, so text from elsewhere is still escaped.
+pub fn trusted(t: Tree(HtmlKind, HtmlAttr), h: TrustedHtml): Node ! {rt, div, overflow} {
+  el(t, Trusted(h), Nil, Nil)
+}

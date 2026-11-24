@@ -1,0 +1,887 @@
+import std::builtin::os { hash_seed }
+import std::hashmap { HashMap }
+import std::builtin::par {
+  Mutex,
+  MutexGuard,
+  Ref,
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  wait,
+  weak_get,
+  weak_of
+}
+// Fine-grained reactivity: signals, memos, watchers and the owner tree.
+//
+// A signal holds its value in a `Ref` and knows only its id. Who reads which signal and the
+// owner tree are kept by the runtime in hash maps of ids, and each watcher's function is kept
+// by the runtime too, so a signal never points at the code that reads it and no strong
+// reference cycle forms. The runtime is reached through the effect `rt`, which `reactive`
+// provides. Its runtime lookup is direct; table locks leave `wait` to the host.
+
+// A watcher: the function to run again when a signal it read changes.
+struct Watcher { id: u64, run: () -> Unit ! {rt, div} }
+struct Cleanup { owner: u64, run: () -> Unit ! {rt, div} }
+
+// A timer the renderer has to start: run `run` after `ms` milliseconds, while `live` is true.
+// `every` is set when the timer starts again after each run.
+pub(open) struct(shared) Timer {
+  ms: u64,
+  every: Bool,
+  live: Ref(Bool),
+  run: () -> Unit ! {rt, div}
+}
+
+// What a resource has: nothing yet, its text, or why loading it failed.
+pub(open) enum Load {
+  Loading
+  Loaded(Text)
+  LoadFailed(Text)
+}
+
+// A resource named `key` that the renderer has to load, and the count of the suspense
+// boundary waiting for it, if any.
+pub(open) struct(shared) Want {
+  key: Text,
+  state: delim::src::signal::Signal(Load),
+  boundary: Option(delim::src::signal::Signal(u64)),
+  // Whether it was resolved or rejected.
+  settled: Ref(Bool)
+}
+
+pub(open) struct(shared) Runtime {
+  // The resources asked for since the renderer last took them, newest
+  // first.
+  wants: Ref(List(Want)),
+  next: Ref(u64),
+  // The watcher whose run is reading signals now, if any.
+  observer: Ref(Option(u64)),
+  // The owner that watchers and cleanups created now belong to.
+  owner: Ref(u64),
+  // signal → the watchers that read it in their last run; watcher → the signals it read.
+  readers: Mutex(HashMap(u64, List(u64))),
+  // (signal, watcher) → 1 while the watcher reads the signal, 2 once it stopped but still stands in
+  // the signal's `readers`, 3 once it was dropped from there. Absent: never read it.
+  reading: Mutex(HashMap(u64, u64)),
+  // id → the name `label` gave it, for `graph`.
+  names: Mutex(HashMap(u64, Text)),
+  sources: Mutex(HashMap(u64, List(u64))),
+  // watcher → its function; a disposed watcher maps to `None`.
+  watchers: Mutex(HashMap(u64, Option(Watcher))),
+  // owner → the owners and watchers created under it, newest first. A watcher is the owner
+  // of what its run creates.
+  children: Mutex(HashMap(u64, List(u64))),
+  // owner or watcher → the owner it was created under, so that ending it takes it out of
+  // that owner's `children`.
+  parents: Mutex(HashMap(u64, u64)),
+  // signal → how many watchers read it now (state 1 in `reading`). A signal no watcher reads
+  // any more is taken out of `readers` and `reading`, so that a signal that ends with its part
+  // leaves nothing behind.
+  live: Mutex(HashMap(u64, u64)),
+  // owner → its cleanups, newest first.
+  cleanups: Mutex(HashMap(u64, List(Cleanup))),
+  // Watchers to run again once the current write is done, newest first, and whether each is
+  // queued.
+  pending: Ref(List(u64)),
+  queued: Mutex(HashMap(u64, Bool)),
+  // Whether a write is already running the pending watchers.
+  flushing: Ref(Bool),
+  // watcher → how many times the current write has run it.
+  runs: Mutex(HashMap(u64, u64)),
+  // The watchers writes stopped running again since `take_stalled`, newest first.
+  stalled: Ref(List(u64)),
+  // The timers asked for since the renderer last took them, newest first.
+  timers: Ref(List(Timer)),
+  // Why the host gave up on a call into the runtime since `take_failures`, newest first.
+  failures: Ref(List(Text)),
+  // id → a function kept for the host to run later (an event's handler). A tree names its
+  // handlers by these ids, so it holds no function that may hold the tree.
+  held: Mutex(HashMap(u64, Watcher))
+}
+
+effect access_runtime(): Runtime direct
+
+// Accessing the runtime may acquire one of its tables; only the host answers wait.
+// The cells the runtime keeps its tables in: making, reading and writing a `Ref` or a
+// `Mutex` are effects the host answers, and so is the seed a table hashes its keys under.
+pub effect cells {
+  ref_new,
+  ref_get,
+  ref_set,
+  weak_of,
+  weak_get,
+  mutex_new,
+  mutex_claim,
+  mutex_take_claimed,
+  mutex_put,
+  hash_seed
+}
+
+pub effect rt { access_runtime, wait, div, overflow, cells }
+
+// A value that the runtime watches. `get` inside a watcher subscribes it to the signal.
+pub struct(shared) Signal(T: Shared + NoBorrow) { id: u64, cell: Ref(T) }
+
+// ---- tables of ids ------------------------------------------------------------------------
+
+pub fn alone_with<A, R>(m: Mutex(A), f: &((x: &mut A) -> R)): R ! {wait, mutex_claim} {
+  var guard := Mutex::lock(m)
+  f(MutexGuard::get_mut(&mut guard))
+}
+
+pub fn own<A: Shared + NoBorrow>(x: &A): A { x }
+
+fn has_id(l: List(u64), x: u64): Bool {
+  match l {
+    Nil => false
+    Cons(y, t) => if y == x { true } else { has_id(t, x) }
+  }
+}
+
+fn without_id(l: List(u64), x: u64): List(u64) {
+  match l {
+    Nil => Nil
+    Cons(y, t) => if y == x { without_id(t, x) } else { Cons(y, without_id(t, x)) }
+  }
+}
+
+fn reverse_ids(l: List(u64), acc: List(u64)): List(u64) {
+  match l {
+    Nil => acc
+    Cons(x, t) => reverse_ids(t, Cons(x, acc))
+  }
+}
+
+fn ids_at(t: Mutex(HashMap(u64, List(u64))), k: u64): List(u64) ! {wait, mutex_claim} {
+  alone_with(t, (m) => match HashMap::get(&m, &k) {
+    None => Nil
+    Some(l) => own(&l)
+  })
+}
+
+// An empty list is not kept, so that an id that ends leaves nothing in the table.
+fn set_ids(t: Mutex(HashMap(u64, List(u64))), k: u64, l: List(u64)): Unit ! {wait, mutex_claim} {
+  alone_with(t, (m) => {
+    match l {
+      Nil => { let gone := HashMap::remove(&mut m, &k); #() }
+      Cons(_, _) => { HashMap::insert(&mut m, k, l); #() }
+    }
+  })
+}
+
+fn push_id(t: Mutex(HashMap(u64, List(u64))), k: u64, x: u64): Unit ! {wait, mutex_claim} {
+  set_ids(t, k, Cons(x, ids_at(t, k)))
+}
+
+fn is_queued(r: Runtime, w: u64): Bool ! {wait, mutex_claim} {
+  alone_with(r.queued, (m) => match HashMap::get(&m, &w) {
+    None => false
+    Some(b) => own(&b)
+  })
+}
+
+fn set_queued(r: Runtime, w: u64, b: Bool): Unit ! {wait, mutex_claim} {
+  alone_with(r.queued, (m) => {
+    if b { HashMap::insert(&mut m, w, b); #() } else { let gone := HashMap::remove(&mut m, &w); #() }
+  })
+}
+
+// Forgets what `w` read in its last run.
+fn unsubscribe(r: Runtime, w: u64): Unit ! {wait, overflow, mutex_claim} {
+  drop_reader(r, ids_at(r.sources, w), w)
+  set_ids(r.sources, w, Nil)
+}
+
+fn drop_reader(r: Runtime, sources: List(u64), w: u64): Unit ! {wait, overflow, mutex_claim} {
+  match sources {
+    Nil => #()
+    Cons(s, rest) => {
+      set_reading(r, s, w, 2)
+      if add_live(r, s, false) == 0 { forget_readers(r, s) } else { #() }
+      drop_reader(r, rest, w)
+    }
+  }
+}
+
+fn reading_key(s: u64, w: u64): u64 ! {overflow} { s * 4294967296 + w }
+
+// One more (`up`) or one fewer watcher reads `s`; answers how many read it now.
+fn add_live(r: Runtime, s: u64, up: Bool): u64 ! {wait, overflow, mutex_claim} {
+  let n := alone_with(r.live, (m) => match HashMap::get(&m, &s) {
+    None => 0
+    Some(x) => own(&x)
+  })
+  let next := if up { n + 1 } else if n == 0 { 0 } else { n - 1 }
+  alone_with(r.live, (m) => {
+    if next == 0 { let gone := HashMap::remove(&mut m, &s); #() } else { HashMap::insert(&mut m, s, next); #() }
+  })
+  next
+}
+
+// No watcher reads `s` now: what `readers` and `reading` keep for it goes.
+fn forget_readers(r: Runtime, s: u64): Unit ! {wait, overflow, mutex_claim} {
+  forget_each(r, s, ids_at(r.readers, s))
+  set_ids(r.readers, s, Nil)
+}
+
+fn forget_each(r: Runtime, s: u64, l: List(u64)): Unit ! {wait, overflow, mutex_claim} {
+  match l {
+    Nil => #()
+    Cons(w, rest) => {
+      set_reading(r, s, w, 0)
+      forget_each(r, s, rest)
+    }
+  }
+}
+
+fn reading_of(r: Runtime, s: u64, w: u64): u64 ! {wait, overflow, mutex_claim} {
+  let key := reading_key(s, w)
+  alone_with(r.reading, (m) => match HashMap::get(&m, &key) {
+    None => 0
+    Some(n) => own(&n)
+  })
+}
+
+// 3 (dropped from the signal's readers) is kept as no entry, which reads as 0: the watcher
+// is not among the readers either way.
+fn set_reading(r: Runtime, s: u64, w: u64, n: u64): Unit ! {wait, overflow, mutex_claim} {
+  let key := reading_key(s, w)
+  alone_with(r.reading, (m) => {
+    if n == 3 || n == 0 { let gone := HashMap::remove(&mut m, &key); #() } else { HashMap::insert(&mut m, key, n); #() }
+  })
+}
+
+// The watchers that read the signal `s` now, oldest first. A watcher that stopped reading it
+// stays in the list until here, so that stopping costs nothing; this also drops it.
+fn live_readers(r: Runtime, s: u64): List(u64) ! {wait, overflow, mutex_claim} {
+  let oldest := keep_live(r, s, ids_at(r.readers, s), Nil)
+  set_ids(r.readers, s, reverse_ids(oldest, Nil))
+  oldest
+}
+
+fn keep_live(
+  r: Runtime,
+  s: u64,
+  l: List(u64),
+  acc: List(u64)
+): List(u64) ! {wait, overflow, mutex_claim} {
+  match l {
+    Nil => acc
+    Cons(w, t) => {
+      let n := reading_of(r, s, w)
+      if n == 1 { keep_live(r, s, t, Cons(w, acc)) } else {
+        if n == 2 { set_reading(r, s, w, 3) } else { #() }
+        keep_live(r, s, t, acc)
+      }
+    }
+  }
+}
+
+fn find_watcher(r: Runtime, w: u64): Option(Watcher) ! {wait, mutex_claim} {
+  alone_with(r.watchers, (m) => match HashMap::get(&m, &w) {
+    None => None
+    Some(x) => own(&x)
+  })
+}
+
+// A disposed watcher is kept as no entry, which `find_watcher` reads as `None`.
+fn set_watcher(r: Runtime, w: u64, x: Option(Watcher)): Unit ! {wait, mutex_claim} {
+  alone_with(r.watchers, (m) => {
+    match x {
+      None => { let gone := HashMap::remove(&mut m, &w); #() }
+      Some(v) => { HashMap::insert(&mut m, w, Some(v)); #() }
+    }
+  })
+}
+
+fn cleanups_at(r: Runtime, o: u64): List(Cleanup) ! {wait, mutex_claim} {
+  alone_with(r.cleanups, (m) => match HashMap::get(&m, &o) {
+    None => Nil
+    Some(l) => own(&l)
+  })
+}
+
+fn set_cleanups(r: Runtime, o: u64, l: List(Cleanup)): Unit ! {wait, mutex_claim} {
+  alone_with(r.cleanups, (m) => {
+    match l {
+      Nil => { let gone := HashMap::remove(&mut m, &o); #() }
+      Cons(_, _) => { HashMap::insert(&mut m, o, l); #() }
+    }
+  })
+}
+
+// ---- functions kept for later ----
+
+// Keeps `f` in the runtime until `release`, and gives the id `run_held` runs it by.
+pub fn hold(f: () -> Unit ! {rt, div}): u64 ! {rt} {
+  let r := perform access_runtime()
+  let id := fresh(r)
+  alone_with(r.held, (m) => { HashMap::insert(&mut m, id, Watcher { id: id, run: f }); #() })
+  id
+}
+
+// Runs what `hold` kept under `id`, if it is still kept.
+pub fn run_held(id: u64): Unit ! {rt, div} {
+  let r := perform access_runtime()
+  let found: Option(Watcher) := alone_with(r.held, (m) => match HashMap::get(&m, &id) {
+    None => None
+    Some(x) => Some(own(&x))
+  })
+  match found { Some(w) => (w.run)(), None => #() }
+}
+
+// Forgets what `hold` kept under `id`.
+pub fn release(id: u64): Unit ! {rt} {
+  let r := perform access_runtime()
+  alone_with(r.held, (m) => { let gone := HashMap::remove(&mut m, &id); #() })
+}
+
+// ---- the runtime --------------------------------------------------------------------------
+
+fn fresh(r: Runtime): u64 ! {overflow, ref_get, ref_set} {
+  let n := perform ref_get(r.next)
+  perform ref_set(r.next, n + 1)
+  n
+}
+
+// The id of the root owner.
+fn root_owner(): u64 { 0 }
+
+fn new_runtime(): Runtime ! {mutex_new, ref_new, hash_seed} {
+  Runtime {
+    wants: perform ref_new(Nil),
+    next: perform ref_new(1),
+    observer: perform ref_new(None),
+    owner: perform ref_new(root_owner()),
+    readers: perform mutex_new(HashMap::new()),
+    reading: perform mutex_new(HashMap::new()),
+    names: perform mutex_new(HashMap::new()),
+    sources: perform mutex_new(HashMap::new()),
+    watchers: perform mutex_new(HashMap::new()),
+    children: perform mutex_new(HashMap::new()),
+    parents: perform mutex_new(HashMap::new()),
+    live: perform mutex_new(HashMap::new()),
+    cleanups: perform mutex_new(HashMap::new()),
+    pending: perform ref_new(Nil),
+    queued: perform mutex_new(HashMap::new()),
+    flushing: perform ref_new(false),
+    runs: perform mutex_new(HashMap::new()),
+    stalled: perform ref_new(Nil),
+    timers: perform ref_new(Nil),
+    failures: perform ref_new(Nil),
+    held: perform mutex_new(HashMap::new())
+  }
+}
+
+// Runs `body` with a reactive runtime of its own.
+pub fn reactive<T, !e>(body: &(() -> T ! {rt} ∪ e)): T ! {div, wait, overflow, cells} ∪ e {
+  let r := new_runtime()
+  handle { body() } with {
+    access_runtime(), k => k(r)
+    return v => v
+  }
+}
+
+// The runtime the caller runs in, for code the host calls later (an event listener) to
+// run in again with `with_runtime`.
+pub fn current(): Runtime ! {rt} { perform access_runtime() }
+
+// Runs `body` in the runtime `r`, which `current` gave.
+pub fn with_runtime<T, !e>(
+  r: Runtime,
+  body: &(() -> T ! {rt} ∪ e)
+): T ! {div, wait, overflow, cells} ∪ e {
+  handle { body() } with {
+    access_runtime(), k => k(r)
+    return v => v
+  }
+}
+
+pub fn signal<T: Shared + NoBorrow>(v: T): delim::src::signal::Signal(T) ! {rt} {
+  let r := perform access_runtime()
+  delim::src::signal::Signal { id: fresh(r), cell: perform ref_new(v) }
+}
+
+// What a signal can be read through: the signal itself, or a `ReadSignal` of it.
+pub class Readable(F: (Shared) -> Shared) {
+  fn read<T: Shared + NoBorrow>(s: F(T)): T ! {rt, overflow}
+  fn look<T: Shared + NoBorrow>(s: F(T)): T ! {ref_get}
+}
+instance Readable(delim::src::signal::Signal) {
+  fn read<T: Shared + NoBorrow>(s: delim::src::signal::Signal(T)): T ! {rt} { get_signal(s) }
+  fn look<T: Shared + NoBorrow>(
+    s: delim::src::signal::Signal(T)
+  ): T ! {ref_get} { perform ref_get(s.cell) }
+}
+
+// A signal that may be read but not written: `readonly(s)` hands out `s` to read only.
+pub struct(shared) ReadSignal(T: Shared + NoBorrow) { source: delim::src::signal::Signal(T) }
+pub fn readonly<T: Shared + NoBorrow>(
+  s: delim::src::signal::Signal(T)
+): ReadSignal(T) { ReadSignal { source: s } }
+instance Readable(ReadSignal) {
+  fn read<T: Shared + NoBorrow>(s: ReadSignal(T)): T ! {rt} { get_signal(s.source) }
+  fn look<T: Shared + NoBorrow>(s: ReadSignal(T)): T ! {ref_get} { perform ref_get(s.source.cell) }
+}
+
+// Reads the signal; inside a watcher, the watcher runs again when the signal changes. A
+// `ReadSignal` reads the same way.
+pub fn get<F: (Shared) -> Shared, T: Shared + NoBorrow>(
+  s: F(T)
+): T ! {rt, overflow} where Readable(F) { Readable::read(s) }
+
+// Reads the signal without subscribing.
+pub fn peek<F: (Shared) -> Shared, T: Shared + NoBorrow>(
+  s: F(T)
+): T ! {ref_get} where Readable(F) { Readable::look(s) }
+
+fn get_signal<T: Shared + NoBorrow>(s: delim::src::signal::Signal(T)): T ! {rt} {
+  let r := perform access_runtime()
+  match perform ref_get(r.observer) {
+    None => #()
+    Some(w) => {
+      let n := reading_of(r, s.id, w)
+      if n == 1 { #() } else {
+        if n == 2 { #() } else { push_id(r.readers, s.id, w) }
+        set_reading(r, s.id, w, 1)
+        let now := add_live(r, s.id, true)
+        push_id(r.sources, w, s.id)
+      }
+    }
+  }
+  perform ref_get(s.cell)
+}
+
+// How many times one write may run a watcher. A watcher that writes a signal it reads makes
+// itself stale again; past this it is not queued, and `take_stalled` names it.
+fn run_limit(): u64 { 100 }
+
+fn runs_of(r: Runtime, w: u64): u64 ! {wait, mutex_claim} {
+  alone_with(r.runs, (m) => match HashMap::get(&m, &w) {
+    None => 0
+    Some(n) => own(&n)
+  })
+}
+
+fn count_run(r: Runtime, w: u64): Unit ! {wait, mutex_claim} {
+  alone_with(r.runs, (m) => {
+    let n := match HashMap::get(&m, &w) {
+      None => 0
+      Some(x) => own(&x)
+    }
+    // The count of runs stays at its greatest when it cannot grow.
+    HashMap::insert(&mut m, w, handle { n + 1 } with { overflow() => n })
+    #()
+  })
+}
+
+fn queue(r: Runtime, ws: List(u64)): Unit ! {wait, ref_get, ref_set, mutex_claim} {
+  match ws {
+    Nil => #()
+    Cons(w, t) => {
+      if is_queued(r, w) { #() } else if runs_of(r, w) >= run_limit() {
+        let ss := perform ref_get(r.stalled)
+        if has_id(ss, w) { #() } else { perform ref_set(r.stalled, Cons(w, ss)) }
+      } else {
+        set_queued(r, w, true)
+        perform ref_set(r.pending, Cons(w, perform ref_get(r.pending)))
+      }
+      queue(r, t)
+    }
+  }
+}
+
+// Writes the signal and runs again, once each, the watchers that read it.
+pub fn set<T: Shared + NoBorrow>(s: delim::src::signal::Signal(T), v: T): Unit ! {rt, div} {
+  let r := perform access_runtime()
+  perform ref_set(s.cell, v)
+  queue(r, live_readers(r, s.id))
+  if perform ref_get(r.flushing) { #() } else {
+    perform ref_set(r.flushing, true)
+    flush(r)
+    end_flush(r)
+  }
+}
+
+// Writes only when the value changes, without subscribing the current watcher.
+pub fn set_eq<T: Shared + NoBorrow>(
+  s: delim::src::signal::Signal(T),
+  v: T
+): Unit ! {rt, div} where DecEq(T) {
+  if peek(s) == v { #() } else { set(s, v) }
+}
+
+fn end_flush(r: Runtime): Unit ! {wait, ref_set, mutex_claim} {
+  alone_with(r.runs, (m) => {
+    *m := HashMap::with_seed(HashMap::seed(&m))
+    #()
+  })
+  perform ref_set(r.flushing, false)
+}
+
+// The watchers that writes stopped running again since the last call, because one write
+// had run them too many times, as when a watcher writes a signal it reads; newest first.
+pub fn take_stalled(): List(u64) ! {rt} {
+  let r := current()
+  let ws := perform ref_get(r.stalled)
+  perform ref_set(r.stalled, Nil)
+  ws
+}
+
+// Puts the runtime back to rest after the host abandoned a call into it halfway, as when a
+// host function threw inside a watcher: the write in progress ends, the watchers it still
+// had queued are dropped and named by `take_stalled`, and no watcher counts as running.
+// Without this, a write left `flushing` and every later write would run no watcher. The host
+// calls it with why it gave up, which `take_failures` gives back.
+pub fn recover(why: Text): Unit ! {rt} {
+  let r := perform access_runtime()
+  perform ref_set(r.failures, Cons(why, perform ref_get(r.failures)))
+  drop_pending(r, perform ref_get(r.pending))
+  perform ref_set(r.pending, Nil)
+  perform ref_set(r.observer, None)
+  perform ref_set(r.owner, root_owner())
+  end_flush(r)
+}
+
+fn drop_pending(r: Runtime, ws: List(u64)): Unit ! {wait, ref_get, ref_set, mutex_claim} {
+  match ws {
+    Nil => #()
+    Cons(w, t) => {
+      set_queued(r, w, false)
+      let ss := perform ref_get(r.stalled)
+      if has_id(ss, w) { #() } else { perform ref_set(r.stalled, Cons(w, ss)) }
+      drop_pending(r, t)
+    }
+  }
+}
+
+// Why the host gave up on calls into the runtime since the last call, newest first.
+pub fn take_failures(): List(Text) ! {rt} {
+  let r := current()
+  let fs := perform ref_get(r.failures)
+  perform ref_set(r.failures, Nil)
+  fs
+}
+
+// Runs `f` with its writes held back: the watchers they make stale run once each, after `f`.
+pub fn batch<T>(f: () -> T ! {rt, div}): T ! {rt, div} {
+  let r := perform access_runtime()
+  if perform ref_get(r.flushing) { f() } else {
+    perform ref_set(r.flushing, true)
+    let v := f()
+    flush(r)
+    end_flush(r)
+    v
+  }
+}
+
+pub fn update<T: Shared + NoBorrow>(
+  s: delim::src::signal::Signal(T),
+  f: (T) -> T ! {div}
+): Unit ! {rt, div} {
+  set(s, f(peek(s)))
+}
+
+// Runs the queued watchers, oldest first, until a run queues no more.
+fn flush(r: Runtime): Unit ! {rt, div} {
+  match perform ref_get(r.pending) {
+    Nil => #()
+    Cons(w, t) => {
+      let batch := reverse_ids(perform ref_get(r.pending), Nil)
+      perform ref_set(r.pending, Nil)
+      run_batch(r, batch)
+      flush(r)
+    }
+  }
+}
+
+fn run_batch(r: Runtime, ws: List(u64)): Unit ! {rt, div} {
+  var l := ws
+  var more := true
+  while more {
+    match l {
+      Nil => { more := false }
+      Cons(w, t) => {
+        set_queued(r, w, false)
+        count_run(r, w)
+        run_watcher(r, w)
+        l := t
+      }
+    }
+  }
+}
+
+// Disposes what the last run of `w` created, forgets what it read, and runs it again.
+fn run_watcher(r: Runtime, w: u64): Unit ! {rt, div} {
+  match find_watcher(r, w) {
+    None => #()
+    Some(x) => {
+      dispose_children(r, w)
+      run_cleanups(r, w)
+      unsubscribe(r, w)
+      let saved_observer := perform ref_get(r.observer)
+      let saved_owner := perform ref_get(r.owner)
+      perform ref_set(r.observer, Some(w))
+      perform ref_set(r.owner, w)
+      (x.run)()
+      perform ref_set(r.observer, saved_observer)
+      perform ref_set(r.owner, saved_owner)
+    }
+  }
+}
+
+// Runs `f` now, and again whenever a signal it read changes. The watcher belongs to the
+// current owner and ends with it.
+pub fn watch(f: () -> Unit ! {rt, div}): Unit ! {rt, div, overflow} {
+  let r := perform access_runtime()
+  let w := fresh(r)
+  adopt(r, perform ref_get(r.owner), w)
+  set_watcher(r, w, Some(Watcher { id: w, run: () => f() }))
+  run_watcher(r, w)
+}
+
+// A signal that holds `f()` and follows the signals `f` reads. Its readers run on every
+// change of a source, even when `f()` gives the same value again; `memo_eq` skips those.
+pub fn memo<T: Shared + NoBorrow>(
+  f: () -> T ! {rt, div}
+): delim::src::signal::Signal(T) ! {rt, div} {
+  let r := perform access_runtime()
+  let m := delim::src::signal::Signal { id: fresh(r), cell: perform ref_new(untracked(f)) }
+  // The first run only subscribes: nothing has read `m` yet, so the write reaches no one.
+  watch(() => set(m, f()))
+  m
+}
+
+// A memo whose readers run only when `f()` gives a value different from the one it holds.
+pub fn memo_eq<T: Shared + NoBorrow>(
+  f: () -> T ! {rt, div}
+): delim::src::signal::Signal(T) ! {rt, div} where DecEq(T) {
+  let r := perform access_runtime()
+  let m := delim::src::signal::Signal { id: fresh(r), cell: perform ref_new(untracked(f)) }
+  watch(() => {
+    let v := f()
+    if v == peek(m) { #() } else { set(m, v) }
+  })
+  m
+}
+
+// Runs `f` without subscribing the current watcher to what it reads.
+pub fn untracked<T>(f: () -> T ! {rt, div}): T ! {rt, div, overflow} {
+  let r := perform access_runtime()
+  let saved := perform ref_get(r.observer)
+  perform ref_set(r.observer, None)
+  let v := f()
+  perform ref_set(r.observer, saved)
+  v
+}
+
+// Runs `f` when the current owner ends: before its watcher runs again, or when it is disposed.
+pub fn on_cleanup(f: () -> Unit ! {rt, div}): Unit ! {rt} {
+  let r := perform access_runtime()
+  let o := perform ref_get(r.owner)
+  set_cleanups(r, o, Cons(Cleanup { owner: o, run: () => f() }, cleanups_at(r, o)))
+}
+
+// ---- timers ------------------------------------------------------------------------------
+
+fn add_timer(ms: u64, every: Bool, f: () -> Unit ! {rt, div}): Unit ! {rt} {
+  let r := perform access_runtime()
+  let live := perform ref_new(true)
+  on_cleanup(() => perform ref_set(live, false))
+  perform ref_set(
+    r.timers,
+    Cons(Timer { ms: ms, every: every, live: live, run: f }, perform ref_get(r.timers))
+  )
+}
+
+// Runs `f` once, `ms` milliseconds from now, unless the current owner ends first. The renderer
+// starts the timer (`take_timers`); one that never starts one, such as the HTML writer, never runs it.
+pub fn after(ms: u64, f: () -> Unit ! {rt, div}): Unit ! {rt} { add_timer(ms, false, f) }
+
+// Runs `f` every `ms` milliseconds until the current owner ends.
+pub fn every(ms: u64, f: () -> Unit ! {rt, div}): Unit ! {rt} { add_timer(ms, true, f) }
+
+fn reverse_timers(l: List(Timer), acc: List(Timer)): List(Timer) {
+  match l {
+    Nil => acc
+    Cons(x, rest) => reverse_timers(rest, Cons(x, acc))
+  }
+}
+
+// The timers asked for since the last call, oldest first, for the renderer to start.
+pub fn take_timers(): List(Timer) ! {rt} {
+  let r := perform access_runtime()
+  let ts := perform ref_get(r.timers)
+  perform ref_set(r.timers, Nil)
+  reverse_timers(ts, Nil)
+}
+
+// The value created in a scope and its owner, for `dispose`.
+pub(open) struct Scoped(T: Type) { value: T, owner: u64 }
+
+// Runs `f` as a new owner and gives back its result and the owner, for `dispose`.
+pub fn scope<T>(f: () -> T ! {rt, div}): Scoped(T) ! {rt, div} {
+  let r := perform access_runtime()
+  let o := fresh(r)
+  adopt(r, perform ref_get(r.owner), o)
+  let saved := perform ref_get(r.owner)
+  perform ref_set(r.owner, o)
+  let v := f()
+  perform ref_set(r.owner, saved)
+  Scoped { value: v, owner: o }
+}
+
+// Ends the owner `o`: what it created ends first, then its cleanups run, newest first.
+pub fn dispose(o: u64): Unit ! {rt, div, overflow} {
+  let r := perform access_runtime()
+  dispose_owner(r, o)
+}
+
+fn dispose_owner(r: Runtime, o: u64): Unit ! {rt, div} {
+  dispose_children(r, o)
+  run_cleanups(r, o)
+  unsubscribe(r, o)
+  set_watcher(r, o, None)
+  disown(r, o)
+}
+
+// `c` was created under `o`.
+fn adopt(r: Runtime, o: u64, c: u64): Unit ! {wait, mutex_claim} {
+  push_id(r.children, o, c)
+  alone_with(r.parents, (m) => { HashMap::insert(&mut m, c, o); #() })
+}
+
+// Takes `c` out of the children of the owner it was created under. When that owner is ending
+// too, its list is already empty.
+fn disown(r: Runtime, c: u64): Unit ! {wait, mutex_claim} {
+  let p := alone_with(r.parents, (m) => match HashMap::remove(&mut m, &c) {
+    None => None
+    Some(kv) => match kv { #(k, v) => Some(v) }
+  })
+  match p {
+    None => #()
+    Some(o) => set_ids(r.children, o, without_id(ids_at(r.children, o), c))
+  }
+}
+
+fn dispose_children(r: Runtime, o: u64): Unit ! {rt, div} {
+  let cs := ids_at(r.children, o)
+  set_ids(r.children, o, Nil)
+  dispose_all(r, cs)
+}
+
+fn dispose_all(r: Runtime, l: List(u64)): Unit ! {rt, div} {
+  match l {
+    Nil => #()
+    Cons(c, t) => {
+      dispose_owner(r, c)
+      dispose_all(r, t)
+    }
+  }
+}
+
+fn run_cleanups(r: Runtime, o: u64): Unit ! {rt, div} {
+  let l := cleanups_at(r, o)
+  set_cleanups(r, o, Nil)
+  run_each(l)
+}
+
+fn run_each(l: List(Cleanup)): Unit ! {rt, div} {
+  match l {
+    Nil => #()
+    Cons(c, t) => {
+      (c.run)()
+      run_each(t)
+    }
+  }
+}
+
+// Runs `f` under the owner `o`, outside any watcher: what it creates belongs to `o`.
+pub fn in_owner<T>(o: u64, f: () -> T ! {rt, div}): T ! {rt, div} {
+  let r := perform access_runtime()
+  let saved_observer := perform ref_get(r.observer)
+  let saved_owner := perform ref_get(r.owner)
+  perform ref_set(r.observer, None)
+  perform ref_set(r.owner, o)
+  let v := f()
+  perform ref_set(r.observer, saved_observer)
+  perform ref_set(r.owner, saved_owner)
+  v
+}
+
+// ---- looking at the graph -----------------------------------------------------------------
+
+fn digit(d: u64): Text ! {overflow} {
+  match Text::slice("0123456789", d, d + 1) {
+    Some(x) => x
+    None => "0"
+  }
+}
+
+fn num(n: u64): Text ! {div, overflow} {
+  if n < 10 { digit(n) } else { concat(num(div(n, 10)), digit(mod(n, 10))) }
+}
+
+// Gives the signal a name that `graph` shows. Returns the signal.
+pub fn label<T: Shared + NoBorrow>(
+  s: delim::src::signal::Signal(T),
+  name: Text
+): delim::src::signal::Signal(T) ! {rt} {
+  let r := perform access_runtime()
+  alone_with(r.names, (m) => {
+    HashMap::insert(&mut m, s.id, name)
+    #()
+  })
+  s
+}
+
+fn name_of(r: Runtime, id: u64): Text ! {wait, div, overflow, mutex_claim} {
+  let n := alone_with(r.names, (m) => match HashMap::get(&m, &id) {
+    None => ""
+    Some(x) => own(&x)
+  })
+  if n == "" { num(id) } else { concat(concat(n, "#"), num(id)) }
+}
+
+fn names_of(r: Runtime, ids: List(u64)): Text ! {wait, div, overflow, mutex_claim} {
+  match ids {
+    Nil => ""
+    Cons(i, rest) => match rest {
+      Nil => name_of(r, i)
+      Cons(j, more) => concat(concat(name_of(r, i), ", "), names_of(r, rest))
+    }
+  }
+}
+
+fn graph_line(r: Runtime, id: u64): Text ! {wait, div, overflow, mutex_claim} {
+  let readers := keep_live(r, id, ids_at(r.readers, id), Nil)
+  let sources := ids_at(r.sources, id)
+  match find_watcher(r, id) {
+    Some(w) => concat(
+      concat(concat("watcher ", name_of(r, id)), " reads ["),
+      concat(names_of(r, sources), "]\n")
+    )
+    None => match readers {
+      Nil => ""
+      Cons(w, rest) => concat(
+        concat(concat("signal ", name_of(r, id)), " is read by ["),
+        concat(names_of(r, readers), "]\n")
+      )
+    }
+  }
+}
+
+fn graph_from(r: Runtime, id: u64, end: u64): Text ! {wait, div, overflow, mutex_claim} {
+  if id >= end { "" } else { concat(graph_line(r, id), graph_from(r, id + 1, end)) }
+}
+
+// The signals that some watcher reads and the watchers with what they read, one line each, in
+// the order they were made. Name signals with `label` to find them.
+pub fn graph(): Text ! {rt, div, overflow} {
+  let r := perform access_runtime()
+  graph_from(r, 1, perform ref_get(r.next))
+}

@@ -1,0 +1,393 @@
+import std::builtin::par { ref_get, ref_new }
+import "../../src/common.taut" { Vocab }
+import "../../../delim-html/src/markup.taut" {
+  Attr,
+  HtmlAttr,
+  HtmlKind,
+  bytes_of,
+  holds,
+  tag_ok,
+  tag_refused,
+  url_ok
+}
+import "../../../delim-html/src/policy.taut" { Attr, attrs, schemes, tags, url_attrs }
+import "../../src/resource.taut" { resource }
+import "../../src/signal.taut" { Signal, get, peek, reactive, rt, set, signal }
+import "../../src/tree.taut" {
+  EventData,
+  EventKind,
+  Node,
+  Tree,
+  fire,
+  take_patches,
+  text,
+  text_dyn,
+  tree
+}
+import std::base { List }
+import "../../../delim-html/src/html-view.taut" { HtmlView, view, view_url_attr_names }
+import "../../../delim-html/src/html.taut" { render_html_in, render_html_loading }
+
+fn marked(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let n := signal("b")
+  view!(```
+    $t <div class="row" title=$get(n)>
+      <p>"a < b"</p>
+      <br/>
+      <button on:press=${(d: EventData) => set(n, "c")}>$text(t, "go")</button>
+    </div>
+    ```)
+}
+
+fn unsafe_link(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let target := signal(" JavaScript:alert(1)")
+  view!(```
+    $t <a href=$get(target) title="ok">"x"</a>
+    ```)
+}
+
+fn all_texts(l: List(Text), f: (t: Text) -> Bool ! {div, overflow}): Bool ! {div, overflow} {
+  match l {
+    Nil => true
+    Cons(x, rest) => f(x) && all_texts(rest, f)
+  }
+}
+
+fn texts_count(l: List(Text)): u64 ! {div, overflow} {
+  match l {
+    Nil => 0
+    Cons(x, rest) => 1 + texts_count(rest)
+  }
+}
+
+fn same_count(l: List(Text), n: Nat): Bool ! {div, overflow} { Nat::of_u64(texts_count(l)) == n }
+
+fn followed_input(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let loaded := resource(t, "input-value")
+  view!(```
+    $t <input
+      value=${match get(loaded) { Loaded(value) => value
+        _ => "waiting" }}
+      disabled=${match get(loaded) { Loading => true
+          _ => false }}/>
+    ```)
+}
+
+// Groups use the existing renderer contract: no layout box, with an element for hydration.
+fn group_html(inner: Text): Text {
+  concat("<delim-group style=\"display:contents\">", concat(inner, "</delim-group>"))
+}
+
+fn control_markup(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let open := signal(true)
+  let items := signal([1, 2])
+  let choice := signal(Some("yes"))
+  view!(```
+    $t <>
+      @if $get(open) { <p>"open"</p> } @else { <p>"closed"</p> }
+      @for item in $get(items) key ${(x: u64) => x} {
+        <span>$text_dyn(t, () => Text::of_u64(get(item)))</span>
+      }
+      @match $get(choice) { Some(value) => { <b>$text(t, value)</b> } None => { "empty" } }
+    </>
+    ```)
+}
+
+fn toggled_markup(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let open := signal(false)
+  let nested := signal(false)
+  let ended := perform ref_new(0)
+  let node := view!(```
+    $t <>
+      <pre>"if true { 1 } else { 0 }"</pre>
+      @if $get(open) {
+        ${ { on_cleanup(() => perform ref_set(ended, perform ref_get(ended) + 1)); text(t, "yes") } }
+      } @else @if $get(nested) { "nested" } @else { "no" }
+      @if $get(open) { "visible" }
+    </>
+    ```)
+  set(nested, true)
+  set(open, true)
+  set(open, false)
+  if perform ref_get(ended) == 1 { node } else { text(t, "cleanup failed") }
+}
+
+fn matched_markup(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let choice := signal(Some("first"))
+  let node := view!(```
+    $t @match $get(choice) {
+      Some(value) => { <b>$text(t, value)</b> <i>"!"</i> }
+      None => { "empty" }
+    }
+    ```)
+  set(choice, None)
+  set(choice, Some("last"))
+  node
+}
+
+struct(shared) ViewItem { id: u64, title: Text }
+fn listed_markup(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let items := signal([ViewItem { id: 1, title: "a" }, ViewItem { id: 2, title: "b" }])
+  let built := perform ref_new(0)
+  let ended := perform ref_new(0)
+  let node := view!(```
+    $t <ul>
+      @for item in $get(items) key ${(value: ViewItem) => value.id} {
+        ${ { perform ref_set(built, perform ref_get(built) + 1); on_cleanup(() => perform ref_set(ended, perform ref_get(ended) + 1)); text(t, "") } }
+        <li>$text_dyn(t, () => get(item).title)</li>
+      }
+    </ul>
+    ```)
+  set(items, [ViewItem { id: 2, title: "B" }, ViewItem { id: 1, title: "A" }])
+  set(items, [ViewItem { id: 2, title: "updated" }, ViewItem { id: 3, title: "new" }])
+  if perform ref_get(built) == 3 && perform ref_get(ended) == 1 { node } else {
+    text(t, "row lifetime failed")
+  }
+}
+
+fn empty_markup(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let items: delim::src::signal::Signal(List(u64)) := signal(Nil)
+  view!(```
+    $t <><>@if ${false} { "hidden" }</> @for item in $get(items) key ${(x: u64) => x} { "row" }</>
+    ```)
+}
+
+fn bound_names(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let value := "outer"
+  let delim_match_value := "caller"
+  view!(```
+    $t <>
+      @if ${true} { $text(t, value) } @else { "no" }
+      @match $Some("inner") {
+        Some(value) => { $text(t, value) $text(t, delim_match_value) }
+        None => {}
+      }
+      $text(t, value)
+    </>
+    ```)
+}
+
+enum(shared) ViewStatus { Busy, Done }
+fn nullary_match(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  view!(```
+    $t @match $Done { Busy => { "busy" } Done => { "done" } }
+    ```)
+}
+
+fn drop_zone(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let n := signal(0)
+  view!(```
+    $t <div
+      class="zone"
+      on:drop=${(d: EventData) => set(n, 1)}
+      on:dragstart=${(d: EventData) => set(n, 2)}
+      on:dragmove=${(d: EventData) => set(n, 3)}
+      on:dragend=${(d: EventData) => set(n, 4)}>
+      "drop here"
+    </div>
+    ```)
+}
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("view", () => {
+  assert_case(
+    "view! writes elements, attributes, texts and handlers",
+    render_html_in(
+      marked
+    ) == "<div class=\"row\" title=\"b\"><p>a &lt; b</p><br><button>go</button></div>"
+  )
+  assert_case(
+    "a followed URL that runs code is not written",
+    render_html_in(unsafe_link) == "<a title=\"ok\">x</a>"
+  )
+  assert_case(
+    "only the attributes and URL schemes on the lists are written",
+    Attr::refused(
+      "srcdoc",
+      "x"
+    ) != None && Attr::refused(
+      "style",
+      "color:red"
+    ) != None && Attr::refused(
+      "formaction",
+      "javascript:x"
+    ) != None && Attr::refused(
+      "data-x",
+      "javascript:x"
+    ) == None && Attr::refused(
+      "aria-label",
+      "x"
+    ) == None && Attr::refused(
+      "href",
+      "HTTPS://example.com/"
+    ) == None && Attr::refused(
+      "href",
+      "mailto:a@example.com"
+    ) == None && Attr::refused(
+      "href",
+      "ftp://example.com/"
+    ) != None && Attr::refused(
+      "src",
+      "data:image/png;base64,AA"
+    ) != None && Attr::refused(
+      "href",
+      "javascript&#58;x"
+    ) != None && Attr::refused(
+      "href",
+      "a&b"
+    ) != None && Attr::refused("href", "/a?b=1&c=2") == None && Attr::refused("href", "../a:b") == None
+  )
+  assert_case(
+    "only the elements on the list are written",
+    tag_refused(
+      "div"
+    ) == None && tag_refused(
+      "my-widget"
+    ) == None && tag_refused(
+      "script"
+    ) != None && tag_refused(
+      "iframe"
+    ) != None && tag_refused("svg") != None && tag_refused("Div") != None && tag_refused("") != None
+  )
+  assert_case(
+    "attribute names and URLs are checked",
+    Attr::refused(
+      "onclick",
+      "x"
+    ) != None && Attr::refused(
+      "Href",
+      "/"
+    ) != None && Attr::refused(
+      "href",
+      "java\tscript:x"
+    ) != None && Attr::refused(
+      "href",
+      "/a?b=javascript:"
+    ) == None && Attr::refused("src", "DATA:text/html,x") != None
+  )
+  assert_case(
+    "view! checks with the lists of policy.taut",
+    all_texts(
+      HtmlView::tag_names(),
+      (x: Text) => tag_ok(x)
+    ) && same_count(
+      HtmlView::tag_names(),
+      List::length(tags())
+    ) && all_texts(
+      HtmlView::attr_names(),
+      (x: Text) => holds(Attr::allowed(bytes_of(x)))
+    ) && same_count(
+      HtmlView::attr_names(),
+      List::length(attrs())
+    ) && all_texts(
+      view_url_attr_names(),
+      (x: Text) => holds(Attr::is_url(bytes_of(x)))
+    ) && same_count(
+      view_url_attr_names(),
+      List::length(url_attrs())
+    ) && same_count(
+      HtmlView::scheme_names(),
+      List::length(schemes())
+    ) && all_texts(HtmlView::scheme_names(), (x: Text) => url_ok(concat(x, ":x")))
+  )
+  assert_case(
+    "view! reads URLs as policy.taut does",
+    all_texts(
+      [
+        "",
+        "/",
+        "a",
+        "https://example.com/",
+        "HTTP://x",
+        " java\tscript:x",
+        "javascript:x",
+        "data:text/html,x",
+        "a&b",
+        "/a&b",
+        "a<b",
+        "a\"b",
+        "?a:b",
+        "#x",
+        "mailto:a@b",
+        "tel:1",
+        "ftp:x",
+        "../a:b",
+        "é:x",
+        "x:y/z"
+      ],
+      (u: Text) => HtmlView::url_ok(u) == url_ok(u)
+    )
+  )
+  assert_case(
+    "view! binds Text values and Bool disabled properties through resource updates",
+    render_html_loading(followed_input, (key: Text) => Ok("ready")) == "<input value=\"ready\">"
+  )
+  assert_case("view! named actions use the normal reactive event batch", reactive(() => {
+    let t: Tree(HtmlKind, HtmlAttr) := tree()
+    let clicks := signal((0: Nat))
+    let node := view!(```
+    $t <button on:action:activate=${(d: EventData) => update(clicks, (n) => Nat::add(n, 1))}>
+      "Activate"
+    </button>
+    ```)
+    let _initial := take_patches(t)
+    fire(t, node, NamedAction("activate"), NoData)
+    Nat::eq(peek(clicks), 1)
+  }))
+  assert_case(
+    "view! fragment, if, for and match use the existing layout groups",
+    render_html_in(
+      control_markup
+    ) == group_html(
+      concat(
+        group_html("<p>open</p>"),
+        concat(group_html("<span>1</span><span>2</span>"), group_html("<b>yes</b>"))
+      )
+    )
+  )
+  assert_case(
+    "view! conditions track signals, dispose branches and preserve literal code",
+    render_html_in(
+      toggled_markup
+    ) == group_html(
+      concat(
+        "<pre>if true { 1 } else { 0 }</pre>",
+        concat(group_html(group_html("nested")), group_html(""))
+      )
+    )
+  )
+  assert_case(
+    "view! match rebuilds on changed payload even within the same constructor",
+    render_html_in(matched_markup) == group_html(group_html("<b>last</b><i>!</i>"))
+  )
+  assert_case(
+    "view! keyed for preserves rows, updates payloads, reorders and disposes missing rows",
+    render_html_in(
+      listed_markup
+    ) == concat(
+      "<ul>",
+      concat(group_html(concat(group_html("<li>updated</li>"), group_html("<li>new</li>"))), "</ul>")
+    )
+  )
+  assert_case(
+    "view! empty fragments, false conditions and empty lists render nothing",
+    render_html_in(empty_markup) == group_html(concat(group_html(group_html("")), group_html("")))
+  )
+  assert_case(
+    "view! generated binders do not capture caller names and pattern binders stay local",
+    render_html_in(
+      bound_names
+    ) == group_html(
+      concat(group_html("outer"), concat(group_html(group_html("innercaller")), "outer"))
+    )
+  )
+  assert_case(
+    "view! match accepts user-defined nullary constructors",
+    render_html_in(nullary_match) == group_html("done")
+  )
+  assert_case(
+    "view! takes the drag and drop events",
+    render_html_in(drop_zone) == "<div class=\"zone\">drop here</div>"
+  )
+})

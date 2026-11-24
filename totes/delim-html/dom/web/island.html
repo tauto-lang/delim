@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Delim island</title>
+<div id="app"></div>
+<script type="module">
+  import { program } from "./load.mjs";
+  // What a server would send: the page rendered by `render_html`, with one island.
+  document.querySelector("#app").innerHTML = await program.island_page();
+  window.before = document.querySelector("button");
+  await program.start_island();
+  document.body.dataset.ready = "1";
+</script>

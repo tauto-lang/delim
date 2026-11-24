@@ -1,0 +1,55 @@
+import std::text { Text }
+import "../../delim-html/src/safe.taut" { Escape, html_safe }
+
+// What `html_safe` says of some HTML, computed by the kernel.
+
+theorem accepts_markup(): html_safe(Text::bytes("<p class=\"a\">x &amp; y<br></p>")) = true {
+  Refl
+}
+
+theorem accepts_link(): html_safe(Text::bytes("<a href=\"/b?c=1&amp;d\">e</a>")) = true {
+  Refl
+}
+
+theorem accepts_marker(): html_safe(Text::bytes("<!--3-->")) = true {
+  Refl
+}
+
+theorem refuses_script(): html_safe(Text::bytes("<script>x</script>")) = false {
+  Refl
+}
+
+theorem refuses_handler(): html_safe(Text::bytes("<img src=x onerror=y>")) = false {
+  Refl
+}
+
+theorem refuses_quoted_handler(): html_safe(Text::bytes("<img onerror=\"y\">")) = false {
+  Refl
+}
+
+theorem refuses_javascript_url(): html_safe(Text::bytes("<a href=\"javascript:x\">")) = false {
+  Refl
+}
+
+theorem refuses_reference_in_scheme(): html_safe(
+  Text::bytes("<a href=\"javascript&#58;x\">")
+) = false {
+  Refl
+}
+
+theorem refuses_srcdoc(): html_safe(Text::bytes("<iframe srcdoc=\"x\">")) = false {
+  Refl
+}
+
+theorem refuses_lt_in_value(): html_safe(Text::bytes("<a title=\"</textarea>\">")) = false {
+  Refl
+}
+
+theorem refuses_bare_lt(): html_safe(Text::bytes("a < b")) = false {
+  Refl
+}
+
+// Escaping a script gives text.
+theorem escapes_script(): Escape::html(Text::bytes("<script>")) = Text::bytes("&lt;script&gt;") {
+  Refl
+}

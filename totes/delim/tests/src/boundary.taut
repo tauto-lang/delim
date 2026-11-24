@@ -1,0 +1,61 @@
+// An `error_boundary` and a `suspense` in it.
+import "../../src/handle.taut" { Resource, failed_resource, read, resolved_resource }
+import "../../src/tree.taut" { Node }
+import "../../../delim-html/src/html-view.taut" { view }
+import "../../../delim-html/src/html.taut" { render_html }
+import "../../../delim-html/src/ui.taut" { Delim, error_boundary, suspense }
+
+fn failed_below_suspense(): Node ! {Delim} {
+  let data: Resource(Text, Text) := failed_resource("lost")
+  error_boundary(#{
+    failed: (why: Text) => view!(```
+<p class="error">$why</p>
+```),
+    body: () => suspense(#{
+      pending: () => view!(```
+<p>"wait"</p>
+```),
+      cancelled: () => view!(```
+<p>"stopped"</p>
+```),
+      body: () => { let value := read(data)
+        view!(```
+<p>$value</p>
+```) }
+    })
+  })
+}
+
+fn settled_below_suspense(): Node ! {Delim} {
+  let data: Resource(Text, Text) := resolved_resource("here")
+  error_boundary(#{
+    failed: (why: Text) => view!(```
+<p class="error">$why</p>
+```),
+    body: () => suspense(#{
+      pending: () => view!(```
+<p>"wait"</p>
+```),
+      cancelled: () => view!(```
+<p>"stopped"</p>
+```),
+      body: () => { let value := read(data)
+        view!(```
+<p>$value</p>
+```) }
+    })
+  })
+}
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("boundary", () => {
+  assert_case(
+    "an error_boundary shows the failure of a suspense body built inside it",
+    render_html(failed_below_suspense) == "<delim-group style=\"display:contents\"><p class=\"error\">lost</p><delim-group style=\"display:contents\"><delim-group style=\"display:contents\"></delim-group></delim-group></delim-group>"
+  )
+  assert_case(
+    "a suspense inside an error_boundary shows its body once settled",
+    render_html(settled_below_suspense) == "<delim-group style=\"display:contents\"><delim-group style=\"display:contents\"><p>here</p></delim-group></delim-group>"
+  )
+})

@@ -1,0 +1,4 @@
+package {
+  name = "delim-ssg"
+  version = "0.1.0"
+}

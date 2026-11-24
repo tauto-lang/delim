@@ -1,0 +1,160 @@
+import std::builtin::os { hash_seed }
+import std::builtin::par {
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  wait,
+  weak_get,
+  weak_of
+}
+import "../../../src/codec.taut" { Codec }
+import "../../../src/route_value.taut" { RouteError, choose_route, route_choice }
+import "../../../src/link.taut" { route_link }
+import "../../../../delim/src/common.taut" { Vocab }
+import "../../../../delim/src/tree.taut" { Tree, text }
+import "../../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../../../delim-html/src/html.taut" { render_html_in }
+import "../../../src/route.taut" { route }
+
+enum Language { Japanese, English }
+fn Language::route_codec(): Codec(Language) {
+  Codec { schema: "route-test/v1",
+    encode: (value: Language) => if value == Japanese { "ja" } else { "en" },
+    decode: (value: Text) => if value == "ja" { Some(Japanese) } else if value == "en" {
+      Some(English)
+    } else { None }
+  }
+}
+
+// The error of a parse, or `None` when it read a value.
+fn route_error<R>(r: Result(R, RouteError)): Option(RouteError) {
+  match r {
+    Ok(value) => None
+    Err(error) => Some(error)
+  }
+}
+
+route!(`TopPage /?lang={lang:Language=English}&example={example:Text}`) => struct TopPage, fn TopPage::href, fn TopPage::parse, fn TopPage::route
+
+pub fn href(): Text ! {div, overflow} {
+  TopPage::href(TopPage { lang: Japanese, example: "a/b ?#%こんにちは" })
+}
+pub fn round_trip(): Bool ! {div, overflow} {
+  match TopPage::parse(href()) {
+    Err(error) => false
+    Ok(value) => value.lang == Japanese && value.example == "a/b ?#%こんにちは"
+  }
+}
+pub fn default_language(): Bool ! {div, overflow} {
+  match TopPage::parse("/?example=effects") { Err(error) => false
+    Ok(value) => value.lang == English && value.example == "effects" }
+}
+
+route!(`SearchPage /search?limit={size:u64=${25}}&enabled={enabled:Bool=${true}}&q={query:Text=${""}}`) => struct SearchPage, fn SearchPage::href, fn SearchPage::parse, fn SearchPage::route
+route!(`AboutPage /about`) => struct AboutPage, fn AboutPage::href, fn AboutPage::parse, fn AboutPage::route
+
+pub fn failures(): Bool ! {div, overflow} {
+  let missing := route_error(TopPage::parse("/")) == Some(MissingParameter("example"))
+  let malformed := route_error(TopPage::parse("/?example=%FF")) == Some(MalformedQuery)
+  let wrong_path := route_error(TopPage::parse("/other?example=effects")) == Some(NoRoute)
+  missing && malformed && wrong_path
+}
+pub fn primitive_defaults(): Bool ! {div, overflow} {
+  match SearchPage::parse("/search?limit=invalid&enabled=no") { Err(error) => false
+    Ok(value) => value.size == 25 && value.enabled && value.query == "" }
+}
+pub fn unicode_and_duplicates(): Bool ! {div, overflow} {
+  match SearchPage::parse("/search?q=こんにちは+Tauto&limit=42&limit=1&ignored=value#fragment") { Err(error) => false
+    Ok(value) => value.size == 42 && value.enabled && value.query == "こんにちは Tauto" }
+}
+pub fn dispatch(): Bool ! {div, overflow} {
+  let spec := TopPage::route()
+  match (spec.parse)("/?lang=ja&example=effects") { Err(error) => false
+    Ok(value) => value.lang == Japanese && value.example == "effects" && (spec.href)(value) == "/?lang=ja&example=effects" }
+}
+pub fn typed_link(): Bool ! {
+  wait,
+  div,
+  overflow,
+  hash_seed,
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of
+} {
+  render_html_in(
+    (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => route_link(
+      t,
+      TopPage::route(),
+      TopPage { lang: Japanese, example: "a&b" },
+      [text(t, "open")]
+    )
+  ) ==
+  "<a href=\"/?lang=ja&amp;example=a%26b\">open</a>"
+}
+pub fn no_parameters(): Bool ! {div, overflow} {
+  match AboutPage::parse(AboutPage::href(AboutPage {})) { Err(error) => false
+    Ok(value) => true }
+}
+
+route!(`RequiredPage /required?count={count:u64}&enabled={enabled:Bool}`) => struct RequiredPage, fn RequiredPage::href, fn RequiredPage::parse, fn RequiredPage::route
+pub fn required_values(): Bool ! {div, overflow} {
+  let numeric := route_error(
+    RequiredPage::parse("/required?count=bad&enabled=true")
+  ) == Some(InvalidParameter("count"))
+  let boolean := route_error(
+    RequiredPage::parse("/required?count=42&enabled=1")
+  ) == Some(InvalidParameter("enabled"))
+  numeric && boolean
+}
+
+route!(`NamesPage /names?q={query:Text}&other={decoded:Text}&count={count:u64}`) => struct NamesPage, fn NamesPage::href, fn NamesPage::parse, fn NamesPage::route
+pub fn field_names(): Bool ! {div, overflow} {
+  match NamesPage::parse("/names?q=one&other=two&count=42") { Err(error) => false
+    Ok(value) => value.query == "one" && value.decoded == "two" && value.count == 42 }
+}
+
+route!(`PostPage /users/{user:u64}/posts/{slug:Text}?tab={tab:Language=English}`) => struct PostPage, fn PostPage::href, fn PostPage::parse, fn PostPage::route
+route!(`LangPage /{lang:Language}/`) => struct LangPage, fn LangPage::href, fn LangPage::parse, fn LangPage::route
+pub fn path_segments(): Bool ! {div, overflow} {
+  let value := PostPage { user: 42, slug: "a/b ?#%..こんにちは+", tab: Japanese }
+  let url := PostPage::href(value)
+  let round := match PostPage::parse(url) { Err(error) => false
+    Ok(back) => back.user == 42 && back.slug == "a/b ?#%..こんにちは+" && back.tab == Japanese }
+  let defaults := match PostPage::parse("/users/7/posts/hello#top") { Err(error) => false
+    Ok(back) => back.user == 7 && back.slug == "hello" && back.tab == English }
+  let dots := PostPage::href(
+    PostPage { user: 1, slug: "..", tab: English }
+  ) == "/users/1/posts/%2E%2E?tab=en"
+  let custom := LangPage::href(LangPage { lang: Japanese }) == "/ja/" && match LangPage::parse("/en/") { Err(error) => false
+    Ok(back) => back.lang == English }
+  url == "/users/42/posts/a%2Fb%20%3F%23%25..%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF%2B?tab=ja" && round && defaults && dots && custom
+}
+pub fn path_mismatches(): Bool ! {div, overflow} {
+  let no := (target: Text) => route_error(PostPage::parse(target)) == Some(NoRoute)
+  let malformed := route_error(PostPage::parse("/users/1/posts/%FF")) == Some(MalformedQuery)
+  no("/users/abc/posts/x") && no("/users/1/posts/") && no("/users/1/posts") && no("/users/1/posts/x/y") &&
+  no("/users//posts/x") && no("/user/1/posts/x") && no("/ko/") && malformed
+}
+fn post_choice(value: PostPage): Text { concat("post:", value.slug) }
+fn about_choice(value: AboutPage): Text { "about" }
+pub fn path_choice(): Bool ! {div, overflow} {
+  let choices := [
+    route_choice(AboutPage::route(), about_choice),
+    route_choice(PostPage::route(), post_choice)
+  ]
+  choose_route(
+    choices,
+    "/users/3/posts/x"
+  ) == Ok("post:x") && choose_route(choices, "/about") == Ok("about") &&
+  choose_route(choices, "/users/x/posts/x") == Err(NoRoute)
+}

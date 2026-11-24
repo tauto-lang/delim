@@ -1,0 +1,425 @@
+import std::base { Nat }
+
+// What the renderers may write, decided on the bytes so that the kernel reads it. Names are
+// lists of byte values, with the name in a comment: the file does not import `std::text`,
+// whose names would meet the prelude's in every file that imports this one: a tag name
+// from a list of elements that run no code, an attribute name from a list of attributes that
+// run none, and a URL whose scheme is one that loads a page or an address. Anything else is
+// refused. The lists name what is allowed, so an element or attribute a browser adds later
+// is refused until it is added here.
+
+pub fn same_bytes(a: List(Nat), b: List(Nat)): Bool {
+  match a {
+    Nil => ⊢ Bool from match b {
+      Nil => true
+      Cons(y, ys) => false
+    }
+    Cons(x, xs) => ⊢ Bool from match b {
+      Nil => false
+      Cons(y, ys) => Bool::and(Nat::eq(x, y), same_bytes(xs, ys))
+    }
+  }
+}
+
+pub fn begins_with(w: List(Nat), p: List(Nat)): Bool {
+  match p {
+    Nil => true
+    Cons(y, ys) => ⊢ Bool from match w {
+      Nil => false
+      Cons(x, xs) => Bool::and(Nat::eq(x, y), begins_with(xs, ys))
+    }
+  }
+}
+
+fn one_of(w: List(Nat), l: List(List(Nat))): Bool {
+  match l {
+    Nil => false
+    Cons(t, rest) => Bool::or(same_bytes(w, t), one_of(w, rest))
+  }
+}
+
+fn has_byte(w: List(Nat), c: Nat): Bool {
+  match w {
+    Nil => false
+    Cons(x, rest) => Bool::or(Nat::eq(x, c), has_byte(rest, c))
+  }
+}
+
+pub fn is_lower(c: Nat): Bool { Bool::and(Nat::le(97, c), Nat::le(c, 122)) }
+
+pub fn is_digit_byte(c: Nat): Bool { Bool::and(Nat::le(48, c), Nat::le(c, 57)) }
+
+// The bytes after the first of a name: lowercase letters, digits and `-`.
+fn name_rest_ok(w: List(Nat)): Bool {
+  match w {
+    Nil => true
+    Cons(c, rest) => Bool::and(
+      Bool::or(is_lower(c), Bool::or(is_digit_byte(c), Nat::eq(c, 45))),
+      name_rest_ok(rest)
+    )
+  }
+}
+
+// A name of a tag or an attribute: a lowercase letter, then lowercase letters, digits and `-`.
+fn name_ok(w: List(Nat)): Bool {
+  match w {
+    Nil => false
+    Cons(c, rest) => Bool::and(is_lower(c), name_rest_ok(rest))
+  }
+}
+
+// ---- tags -------------------------------------------------------------------------------------
+
+// Elements of HTML that run no code and do not change how the text after them is read. Left out:
+// `script`, `style`, `iframe`, `frame`, `object`, `embed`, `base`, `link`, `meta`, `template`,
+// `noscript`, `svg`, `math` and the elements that only belong in `<head>`.
+pub fn tags(): List(List(Nat)) {
+  [
+    [97], // a
+    [97, 98, 98, 114], // abbr
+    [97, 100, 100, 114, 101, 115, 115], // address
+    [97, 114, 116, 105, 99, 108, 101], // article
+    [97, 115, 105, 100, 101], // aside
+    [97, 117, 100, 105, 111], // audio
+    [98], // b
+    [98, 100, 105], // bdi
+    [98, 100, 111], // bdo
+    [98, 108, 111, 99, 107, 113, 117, 111, 116, 101], // blockquote
+    [98, 114], // br
+    [98, 117, 116, 116, 111, 110], // button
+    [99, 97, 110, 118, 97, 115], // canvas
+    [99, 97, 112, 116, 105, 111, 110], // caption
+    [99, 105, 116, 101], // cite
+    [99, 111, 100, 101], // code
+    [99, 111, 108], // col
+    [99, 111, 108, 103, 114, 111, 117, 112], // colgroup
+    [100, 97, 116, 97], // data
+    [100, 97, 116, 97, 108, 105, 115, 116], // datalist
+    [100, 100], // dd
+    [100, 101, 108], // del
+    [100, 101, 116, 97, 105, 108, 115], // details
+    [100, 102, 110], // dfn
+    [100, 105, 97, 108, 111, 103], // dialog
+    [100, 105, 118], // div
+    [100, 108], // dl
+    [100, 116], // dt
+    [101, 109], // em
+    [102, 105, 101, 108, 100, 115, 101, 116], // fieldset
+    [102, 105, 103, 99, 97, 112, 116, 105, 111, 110], // figcaption
+    [102, 105, 103, 117, 114, 101], // figure
+    [102, 111, 111, 116, 101, 114], // footer
+    [102, 111, 114, 109], // form
+    [104, 49], // h1
+    [104, 50], // h2
+    [104, 51], // h3
+    [104, 52], // h4
+    [104, 53], // h5
+    [104, 54], // h6
+    [104, 101, 97, 100, 101, 114], // header
+    [104, 103, 114, 111, 117, 112], // hgroup
+    [104, 114], // hr
+    [105], // i
+    [105, 109, 103], // img
+    [105, 110, 112, 117, 116], // input
+    [105, 110, 115], // ins
+    [107, 98, 100], // kbd
+    [108, 97, 98, 101, 108], // label
+    [108, 101, 103, 101, 110, 100], // legend
+    [108, 105], // li
+    [109, 97, 105, 110], // main
+    [109, 97, 114, 107], // mark
+    [109, 101, 110, 117], // menu
+    [109, 101, 116, 101, 114], // meter
+    [110, 97, 118], // nav
+    [111, 108], // ol
+    [111, 112, 116, 103, 114, 111, 117, 112], // optgroup
+    [111, 112, 116, 105, 111, 110], // option
+    [111, 117, 116, 112, 117, 116], // output
+    [112], // p
+    [112, 105, 99, 116, 117, 114, 101], // picture
+    [112, 114, 101], // pre
+    [112, 114, 111, 103, 114, 101, 115, 115], // progress
+    [113], // q
+    [114, 112], // rp
+    [114, 116], // rt
+    [114, 117, 98, 121], // ruby
+    [115], // s
+    [115, 97, 109, 112], // samp
+    [115, 101, 97, 114, 99, 104], // search
+    [115, 101, 99, 116, 105, 111, 110], // section
+    [115, 101, 108, 101, 99, 116], // select
+    [115, 109, 97, 108, 108], // small
+    [115, 111, 117, 114, 99, 101], // source
+    [115, 112, 97, 110], // span
+    [115, 116, 114, 111, 110, 103], // strong
+    [115, 117, 98], // sub
+    [115, 117, 109, 109, 97, 114, 121], // summary
+    [115, 117, 112], // sup
+    [116, 97, 98, 108, 101], // table
+    [116, 98, 111, 100, 121], // tbody
+    [116, 100], // td
+    [116, 101, 120, 116, 97, 114, 101, 97], // textarea
+    [116, 102, 111, 111, 116], // tfoot
+    [116, 104], // th
+    [116, 104, 101, 97, 100], // thead
+    [116, 105, 109, 101], // time
+    [116, 114], // tr
+    [116, 114, 97, 99, 107], // track
+    [117], // u
+    [117, 108], // ul
+    [118, 97, 114], // var
+    [118, 105, 100, 101, 111], // video
+    [119, 98, 114] // wbr
+  ]
+}
+
+// Whether the tag `w` may be written: one of `tags`, or the name of a custom element (a name
+// with a `-`), which runs only the code the page defines for it.
+pub fn tag_allowed(w: List(Nat)): Bool {
+  Bool::and(name_ok(w), Bool::or(one_of(w, tags()), has_byte(w, 45)))
+}
+
+// Elements that have no end tag.
+pub fn void_tags(): List(List(Nat)) {
+  [
+    [97, 114, 101, 97], // area
+    [98, 114], // br
+    [99, 111, 108], // col
+    [104, 114], // hr
+    [105, 109, 103], // img
+    [105, 110, 112, 117, 116], // input
+    [115, 111, 117, 114, 99, 101], // source
+    [116, 114, 97, 99, 107], // track
+    [119, 98, 114] // wbr
+  ]
+}
+
+pub fn tag_void(w: List(Nat)): Bool { one_of(w, void_tags()) }
+
+// ---- attributes -------------------------------------------------------------------------------
+
+// Attributes that run no code. Left out: the `on…` handlers, `style`, `srcdoc`, and any
+// attribute whose value is HTML, script or a URL other than those of `url_attrs`.
+pub fn attrs(): List(List(Nat)) {
+  [
+    [97, 98, 98, 114], // abbr
+    [97, 99, 99, 101, 112, 116], // accept
+    [97, 99, 99, 101, 115, 115, 107, 101, 121], // accesskey
+    [97, 99, 116, 105, 111, 110], // action
+    [97, 108, 116], // alt
+    [97, 117, 116, 111, 99, 97, 112, 105, 116, 97, 108, 105, 122, 101], // autocapitalize
+    [97, 117, 116, 111, 99, 111, 109, 112, 108, 101, 116, 101], // autocomplete
+    [97, 117, 116, 111, 102, 111, 99, 117, 115], // autofocus
+    [97, 117, 116, 111, 112, 108, 97, 121], // autoplay
+    [99, 104, 101, 99, 107, 101, 100], // checked
+    [99, 105, 116, 101], // cite
+    [99, 108, 97, 115, 115], // class
+    [99, 111, 108, 115], // cols
+    [99, 111, 108, 115, 112, 97, 110], // colspan
+    [99, 111, 110, 116, 101, 110, 116, 101, 100, 105, 116, 97, 98, 108, 101], // contenteditable
+    [99, 111, 110, 116, 114, 111, 108, 115], // controls
+    [99, 111, 111, 114, 100, 115], // coords
+    [99, 114, 111, 115, 115, 111, 114, 105, 103, 105, 110], // crossorigin
+    [100, 97, 116, 101, 116, 105, 109, 101], // datetime
+    [100, 101, 99, 111, 100, 105, 110, 103], // decoding
+    [100, 101, 102, 97, 117, 108, 116], // default
+    [100, 105, 114], // dir
+    [100, 105, 114, 110, 97, 109, 101], // dirname
+    [100, 105, 115, 97, 98, 108, 101, 100], // disabled
+    [100, 111, 119, 110, 108, 111, 97, 100], // download
+    [100, 114, 97, 103, 103, 97, 98, 108, 101], // draggable
+    [101, 110, 99, 116, 121, 112, 101], // enctype
+    [101, 110, 116, 101, 114, 107, 101, 121, 104, 105, 110, 116], // enterkeyhint
+    [102, 111, 114], // for
+    [102, 111, 114, 109], // form
+    [102, 111, 114, 109, 97, 99, 116, 105, 111, 110], // formaction
+    [102, 111, 114, 109, 101, 110, 99, 116, 121, 112, 101], // formenctype
+    [102, 111, 114, 109, 109, 101, 116, 104, 111, 100], // formmethod
+    [102, 111, 114, 109, 110, 111, 118, 97, 108, 105, 100, 97, 116, 101], // formnovalidate
+    [102, 111, 114, 109, 116, 97, 114, 103, 101, 116], // formtarget
+    [104, 101, 97, 100, 101, 114, 115], // headers
+    [104, 101, 105, 103, 104, 116], // height
+    [104, 105, 100, 100, 101, 110], // hidden
+    [104, 105, 103, 104], // high
+    [104, 114, 101, 102], // href
+    [104, 114, 101, 102, 108, 97, 110, 103], // hreflang
+    [105, 100], // id
+    [105, 110, 101, 114, 116], // inert
+    [105, 110, 112, 117, 116, 109, 111, 100, 101], // inputmode
+    [107, 105, 110, 100], // kind
+    [108, 97, 98, 101, 108], // label
+    [108, 97, 110, 103], // lang
+    [108, 105, 115, 116], // list
+    [108, 111, 97, 100, 105, 110, 103], // loading
+    [108, 111, 111, 112], // loop
+    [108, 111, 119], // low
+    [109, 97, 120], // max
+    [109, 97, 120, 108, 101, 110, 103, 116, 104], // maxlength
+    [109, 101, 116, 104, 111, 100], // method
+    [109, 105, 110], // min
+    [109, 105, 110, 108, 101, 110, 103, 116, 104], // minlength
+    [109, 117, 108, 116, 105, 112, 108, 101], // multiple
+    [109, 117, 116, 101, 100], // muted
+    [110, 97, 109, 101], // name
+    [110, 111, 118, 97, 108, 105, 100, 97, 116, 101], // novalidate
+    [111, 112, 101, 110], // open
+    [111, 112, 116, 105, 109, 117, 109], // optimum
+    [112, 97, 116, 116, 101, 114, 110], // pattern
+    [112, 108, 97, 99, 101, 104, 111, 108, 100, 101, 114], // placeholder
+    [112, 108, 97, 121, 115, 105, 110, 108, 105, 110, 101], // playsinline
+    [112, 111, 112, 111, 118, 101, 114], // popover
+    [112, 111, 112, 111, 118, 101, 114, 116, 97, 114, 103, 101, 116], // popovertarget
+    [112, 111, 112, 111, 118, 101, 114, 116, 97, 114, 103, 101, 116, 97, 99, 116, 105, 111, 110], // popovertargetaction
+    [112, 111, 115, 116, 101, 114], // poster
+    [112, 114, 101, 108, 111, 97, 100], // preload
+    [114, 101, 97, 100, 111, 110, 108, 121], // readonly
+    [114, 101, 108], // rel
+    [114, 101, 113, 117, 105, 114, 101, 100], // required
+    [114, 101, 118, 101, 114, 115, 101, 100], // reversed
+    [114, 111, 108, 101], // role
+    [114, 111, 119, 115], // rows
+    [114, 111, 119, 115, 112, 97, 110], // rowspan
+    [115, 99, 111, 112, 101], // scope
+    [115, 101, 108, 101, 99, 116, 101, 100], // selected
+    [115, 104, 97, 112, 101], // shape
+    [115, 105, 122, 101], // size
+    [115, 105, 122, 101, 115], // sizes
+    [115, 112, 97, 110], // span
+    [115, 112, 101, 108, 108, 99, 104, 101, 99, 107], // spellcheck
+    [115, 114, 99], // src
+    [115, 114, 99, 108, 97, 110, 103], // srclang
+    [115, 114, 99, 115, 101, 116], // srcset
+    [115, 116, 97, 114, 116], // start
+    [115, 116, 101, 112], // step
+    [116, 97, 98, 105, 110, 100, 101, 120], // tabindex
+    [116, 97, 114, 103, 101, 116], // target
+    [116, 105, 116, 108, 101], // title
+    [116, 114, 97, 110, 115, 108, 97, 116, 101], // translate
+    [116, 121, 112, 101], // type
+    [118, 97, 108, 117, 101], // value
+    [119, 105, 100, 116, 104], // width
+    [119, 114, 97, 112] // wrap
+  ]
+}
+
+pub fn data_prefix(): List(Nat) { [100, 97, 116, 97, 45] } // data-
+
+pub fn aria_prefix(): List(Nat) { [97, 114, 105, 97, 45] } // aria-
+
+pub fn style_name(): List(Nat) { [115, 116, 121, 108, 101] } // style
+
+pub fn display_contents(): List(Nat) {
+  [100, 105, 115, 112, 108, 97, 121, 58, 99, 111, 110, 116, 101, 110, 116, 115] // display:contents
+}
+
+pub module Attr {
+  // Whether the attribute `w` may be written: one of `attrs`, or a `data-…` or `aria-…`
+  // attribute.
+  pub fn allowed(w: List(Nat)): Bool {
+    Bool::and(
+      name_ok(w),
+      Bool::or(
+        one_of(w, attrs()),
+        Bool::or(begins_with(w, data_prefix()), begins_with(w, aria_prefix()))
+      )
+    )
+  }
+
+  pub fn is_url(w: List(Nat)): Bool { one_of(w, url_attrs()) }
+
+  // ---- URLs -------------------------------------------------------------------------------------
+
+  // Whether `name="value"` may be written. `style` is written only as `display:contents`, which
+  // the renderers give the elements that hold a group, an island or trusted HTML.
+  pub fn value_allowed(name: List(Nat), value: List(Nat)): Bool {
+    Bool::or(
+      Bool::and(
+        Attr::allowed(name),
+        ⊢ Bool from match Attr::is_url(name) {
+          true => url_allowed(value)
+          false => true
+        }
+      ),
+      Bool::and(same_bytes(name, style_name()), same_bytes(value, display_contents()))
+    )
+  }
+}
+
+// The attributes of `attrs` whose value is a URL.
+pub fn url_attrs(): List(List(Nat)) {
+  [
+    [97, 99, 116, 105, 111, 110], // action
+    [99, 105, 116, 101], // cite
+    [102, 111, 114, 109, 97, 99, 116, 105, 111, 110], // formaction
+    [104, 114, 101, 102], // href
+    [112, 111, 115, 116, 101, 114], // poster
+    [115, 114, 99] // src
+  ]
+}
+
+fn ascii_lower(c: Nat): Nat {
+  match Bool::and(Nat::le(65, c), Nat::le(c, 90)) {
+    true => Nat::add(c, 32)
+    false => c
+  }
+}
+
+// The bytes of a URL before its first `/`, `?` or `#`, lowercased, without the spaces and
+// control bytes a browser skips (it skips fewer, so what it reads as a scheme is read here
+// too).
+fn url_head(w: List(Nat)): List(Nat) {
+  match w {
+    Nil => Nil
+    Cons(c, rest) => ⊢ List(Nat) from match Bool::or(
+      Nat::eq(c, 47),
+      Bool::or(Nat::eq(c, 63), Nat::eq(c, 35))
+    ) {
+      true => Nil
+      false => ⊢ List(Nat) from match Nat::le(c, 32) {
+        true => url_head(rest)
+        false => Cons(ascii_lower(c), url_head(rest))
+      }
+    }
+  }
+}
+
+// The bytes before the first `:`.
+fn before_colon(w: List(Nat)): List(Nat) {
+  match w {
+    Nil => Nil
+    Cons(c, rest) => ⊢ List(Nat) from match Nat::eq(c, 58) {
+      true => Nil
+      false => Cons(c, before_colon(rest))
+    }
+  }
+}
+
+pub fn schemes(): List(List(Nat)) {
+  [
+    [104, 116, 116, 112], // http
+    [104, 116, 116, 112, 115], // https
+    [109, 97, 105, 108, 116, 111], // mailto
+    [116, 101, 108] // tel
+  ]
+}
+
+// `&`, `<`, `>` and `"`: a character reference could spell a `:` or a scheme, and escaping
+// the others would add an `&`.
+fn has_markup(h: List(Nat)): Bool {
+  Bool::or(Bool::or(has_byte(h, 38), has_byte(h, 60)), Bool::or(has_byte(h, 62), has_byte(h, 34)))
+}
+
+fn head_allowed(h: List(Nat)): Bool {
+  match has_markup(h) {
+    true => false
+    false => ⊢ Bool from match has_byte(h, 58) {
+      true => one_of(before_colon(h), schemes())
+      // No scheme: a path relative to the page.
+      false => true
+    }
+  }
+}
+
+// Whether the URL `w` may be written: one relative to the page, or one whose scheme is `http`,
+// `https`, `mailto` or `tel`; and no `&`, `<`, `>` or `"` before its first `/`, `?` or `#`.
+pub fn url_allowed(w: List(Nat)): Bool { head_allowed(url_head(w)) }

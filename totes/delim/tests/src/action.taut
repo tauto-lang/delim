@@ -1,0 +1,22 @@
+import "../../src/hooks.taut" { Action, ActionOptions, ActionPolicy, use_action }
+import "../../src/handle.taut" { ResourceState, read, resource_handle, state }
+import "../../src/signal.taut" { Signal, reactive, set, signal }
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("action", () => {
+  assert_case("action runs and preserves the result", reactive(() => {
+   // The run waits on no resource, so the options write the resource type `R`.
+   let options: ActionOptions(u64, u64, Text, Unit, Unit) := ActionOptions { policy: IgnoreWhilePending, run: (n: u64) => (n + 1: u64), invalidate_on: () => #(), on_success: (value: u64) => #() }
+   let a: Action(u64, u64, Text) := use_action(options)
+   (a.start)(2)
+   match (a.result)() { Some(h) => match state(h) { Ready(3) => true, Ready(_) => false, Pending => false, Failed(_) => false, Cancelled => false }, None => false }
+  }))
+  assert_case("action suspends and resumes a typed resource", reactive(() => {
+   let source: delim::src::signal::Signal(ResourceState(u64, Text)) := signal(Pending)
+   let a: Action(u64, u64, Text) := use_action(ActionOptions { policy: IgnoreWhilePending, run: (n: u64) => read(resource_handle(source)) + n, invalidate_on: () => #(), on_success: (value: u64) => #() })
+   (a.start)(2)
+   let before := (a.pending)()
+   set(source, Ready(5))
+   before && match (a.result)() { Some(h) => match state(h) { Ready(7) => true, Ready(_) => false, Pending => false, Failed(_) => false, Cancelled => false }, None => false }
+  }))
+})

@@ -1,0 +1,22 @@
+import std::builtin::os { print, stdout }
+import "../../../src/codec.taut" { text_codec, u64_codec }
+import "../../../src/route_value.taut" {
+  RouteError,
+  route_bool_codec,
+  route_query,
+  route_read,
+  route_read_or
+}
+fn check(name: Text, value: Bool): Unit ! {stdout} {
+  print(concat(concat(name, " = "), if value { "\"ok\"\n" } else { "\"FAILED\"\n" }))
+}
+perform main(() => {
+  let parsed := route_query("/?lang=ja&count=42&lang=en#section", "/")
+  check("query and primitive codecs", match parsed {
+    Err(error) => false
+    Ok(values) => route_read(text_codec(), values, "lang") == Ok("ja") && route_read(u64_codec(), values, "count") == Ok((42: u64)) && route_read_or(route_bool_codec(), values, "missing", true) == Ok(true)
+  })
+  check("malformed percent escapes", route_query("/?lang=%FF", "/") == Err(MalformedQuery))
+  check("paths are distinct", route_query("/other?lang=ja", "/") == Err(NoRoute))
+  #()
+})

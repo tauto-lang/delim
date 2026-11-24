@@ -1,0 +1,766 @@
+import std::builtin::os { hash_seed }
+import std::builtin::par {
+  Task,
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  spawn,
+  wait,
+  weak_get,
+  weak_of
+}
+import "../../../delim/src/common.taut" { Vocab }
+import "../../../delim/src/signal.taut" {
+  Runtime,
+  Timer,
+  Want,
+  cells,
+  current,
+  reactive,
+  rt,
+  take_stalled,
+  take_timers,
+  with_runtime
+}
+import "../../../delim/src/tree.taut" {
+  EventData,
+  EventKind,
+  Node,
+  Patch,
+  Tree,
+  bubbles,
+  fire,
+  handler_nodes,
+  take_duplicate_keys,
+  take_patches,
+  tree
+}
+import "../../src/markup.taut" {
+  Attr,
+  HtmlAttr,
+  HtmlKind,
+  decimal,
+  tag_refused,
+  trusted_text,
+  web_vocab,
+  written_tag
+}
+import "../../src/svg.taut" { css_text, svg_attr_ok, svg_tag_ok, var_ok }
+import "../../../delim/src/resource.taut" { reject, resolve, take_wants }
+import "../../src/ui.taut" { Delim, with_ui }
+
+// The DOM renderer: element kinds are tag names, properties are attributes, and each patch
+// becomes a call into `host/dom.mjs`, which keeps the DOM node of every number. Events reach
+// the tree through one listener on the root, which the host calls with the number of the
+// node the event came from.
+
+extern {
+  type Doc
+  // What the host answered for a load or an event; read it with the functions below.
+  type HostLoad
+  type HostEvent
+}
+
+// An event under the root: the number of the node it happened on, the code of its kind
+// (`kind_code`), and its text, place and button. `open` is false for the one that says no
+// more come.
+pub struct DomEvent { open: Bool, node: u32, kind: u64, text: Text, x: i64, y: i64, button: i64 }
+
+// Events being handed to a handler by a task of their own, till `stop`.
+pub struct(linear) Listening { d: Doc, task: Task(Unit) }
+
+// Calls `on_event` with each event under the root, one after another, in a task of its own;
+// `on_event` may wait. It ends when `stop` is called or the root is released.
+pub fn listen(
+  d: &Doc,
+  on_event: (ev: DomEvent) -> Unit ! {
+    div,
+    overflow,
+    wait,
+    cells,
+    ∀ T. spawn(
+      () -> T ! {
+        hash_seed,
+        ref_new,
+        ref_get,
+        ref_set,
+        weak_of,
+        weak_get,
+        mutex_new,
+        mutex_claim,
+        mutex_take_claimed,
+        mutex_put
+      }
+    )
+  }
+): Listening ! {
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  let dd := d
+  Listening { d: dd, task: perform spawn(() => hand_each(&dd, on_event)) }
+}
+
+fn hand_each(
+  d: &Doc,
+  on_event: (ev: DomEvent) -> Unit ! {
+    div,
+    overflow,
+    wait,
+    cells,
+    ∀ T. spawn(
+      () -> T ! {
+        hash_seed,
+        ref_new,
+        ref_get,
+        ref_set,
+        weak_of,
+        weak_get,
+        mutex_new,
+        mutex_claim,
+        mutex_take_claimed,
+        mutex_put
+      }
+    )
+  }
+): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  let h := dom_next(&d)
+  let ev := DomEvent {
+    open: host_event_open(&h),
+    node: host_event_node(&h),
+    kind: host_event_code(&h),
+    text: host_event_text(&h),
+    x: host_event_x(&h),
+    y: host_event_y(&h),
+    button: host_event_button(&h)
+  }
+  if ev.open {
+    on_event(ev)
+    hand_each(&d, on_event)
+  } else { #() }
+}
+
+// Ends the events and waits for the handler running now to return.
+pub fn stop(l: Listening): Unit ! {wait} {
+  match l {
+    Listening { d, task } => {
+      dom_unlisten(&d)
+      Task::join(task)
+    }
+  }
+}
+
+extern {
+  fn dom_root(selector: Text): Doc
+  // The element `selector` names, whose nodes the server rendered with their numbers: until
+  // `dom_settle`, a node is taken from the page instead of made.
+  fn dom_hydrate_root(selector: Text): Doc
+  // The text the server rendered the island at the root from.
+  fn dom_props(d: &Doc): Text
+  fn dom_settle(d: &Doc): Unit
+  fn dom_island(d: &Doc, n: u32, name: Text, props: Text, inner: Text): Unit
+  fn dom_trusted(d: &Doc, n: u32, html: Text): Unit
+  fn dom_create(d: &Doc, n: u32, tag: Text): Unit
+  fn dom_text(d: &Doc, n: u32, s: Text): Unit
+  fn dom_group(d: &Doc, n: u32): Unit
+  fn dom_attr(d: &Doc, n: u32, name: Text, value: Text): Unit
+  fn dom_value(d: &Doc, n: u32, value: Text): Unit
+  fn dom_remove_attr(d: &Doc, n: u32, name: Text): Unit
+  fn dom_bool(d: &Doc, n: u32, name: Text, value: Bool): Unit
+  fn dom_disabled(d: &Doc, n: u32, disabled: Bool): Unit
+  fn dom_set_text(d: &Doc, n: u32, s: Text): Unit
+  fn dom_append(d: &Doc, parent: u32, child: u32): Unit
+  fn dom_insert_before(d: &Doc, parent: u32, child: u32, before: u32): Unit
+  fn dom_remove(d: &Doc, n: u32): Unit
+  fn dom_mount(d: &Doc, n: u32): Unit
+  // `f(node, kind, text, x, y, button)` for each event under the root; `kind` is the code of
+  // `kind_code`.
+  // Loads the resource `key` with the loader set on the host: whether it loaded, and its text
+  // or why it failed. The host answers with a Promise, which the call waits on.
+  fn dom_load(d: &Doc, key: Text): HostLoad ! {wait}
+  fn host_load_ok(l: &HostLoad): Bool
+  fn host_load_text(l: &HostLoad): Text
+  // The next event under the root, waiting for one: the host answers with a Promise. Once
+  // the root is released or `dom_unlisten` is called, it is `DomEvent::closed`, and so is
+  // every call after.
+  fn dom_next(d: &Doc): HostEvent ! {wait}
+  fn host_event_open(e: &HostEvent): Bool
+  fn host_event_node(e: &HostEvent): u32
+  fn host_event_code(e: &HostEvent): u64
+  fn host_event_text(e: &HostEvent): Text
+  fn host_event_x(e: &HostEvent): i64
+  fn host_event_y(e: &HostEvent): i64
+  fn host_event_button(e: &HostEvent): i64
+  // Ends the events of the root: a `dom_next` waiting, and every later one, gets the closed one.
+  fn dom_unlisten(d: &Doc): Unit
+  // Returns `ms` milliseconds from now, waiting till then: the host answers with a Promise.
+  // Whether the root is still there then.
+  fn dom_sleep(d: &Doc, ms: u64): Bool ! {wait}
+  // An SVG element numbered `n`; `tag` is one `svg_tag_ok` allows.
+  fn dom_svg(d: &Doc, n: u32, tag: Text): Unit
+  // Sets the custom property `name` (one `var_ok` allows) of the element to `value`, or
+  // removes it when `value` is "".
+  fn dom_var(d: &Doc, n: u32, name: Text, value: Text): Unit
+  // Whether a press on the element that moves becomes a drag of it.
+  fn dom_drag(d: &Doc, n: u32, on: Bool): Unit
+  // The number of the nearest numbered node above `n` under the root, or 0.
+  fn dom_parent(d: &Doc, n: u32): u32
+  // Tells the page about something the program got wrong but went on from: `kind` names it
+  // and `detail` says which. The host warns on the console and raises it as an event that the
+  // development overlay, or a production error hook, listens to.
+  fn dom_warn(d: &Doc, kind: Text, detail: Text): Unit
+}
+
+fn set_attr(d: &Doc, n: u32, a: HtmlAttr): Unit ! {div, overflow, wait} {
+  match a {
+    // An attribute `Attr::refused` names is not written; the element keeps what it had.
+    Attr(k, v) => match Attr::refused(k, v) {
+      None => dom_attr(&d, n, k, v)
+      Some(why) => #()
+    }
+    Aria(role, l) => {
+      dom_attr(&d, n, "role", role)
+      if l == "" { #() } else { dom_attr(&d, n, "aria-label", l) }
+    }
+    Value(v) => dom_value(&d, n, v)
+    Disabled(b) => dom_disabled(&d, n, b)
+    Checked(b) => dom_bool(&d, n, "checked", b)
+    Selected(b) => dom_bool(&d, n, "selected", b)
+    Multiple(b) => dom_bool(&d, n, "multiple", b)
+    Hidden(b) => dom_bool(&d, n, "hidden", b)
+    Required(b) => dom_bool(&d, n, "required", b)
+    ReadOnly(b) => dom_bool(&d, n, "readOnly", b)
+    OptionalAttr(k, v) => match v {
+      None => dom_remove_attr(&d, n, k)
+      Some(text) => set_attr(&d, n, Attr(k, text))
+    }
+    SvgAttr(k, v) => if svg_attr_ok(k, v) { dom_attr(&d, n, k, v) } else { #() }
+    Var(k, v) => if var_ok(k) { dom_var(&d, n, k, css_text(v)) } else { #() }
+    DragSource(b) => dom_drag(&d, n, b)
+  }
+}
+
+fn apply(d: &Doc, ps: List(Patch(HtmlKind, HtmlAttr))): Unit ! {div, overflow, wait} {
+  match ps {
+    Nil => #()
+    Cons(p, rest) => {
+      match p {
+        Create(n, k) => match k {
+          // A refused tag is made as an element that shows nothing.
+          Tag(tag) => {
+            dom_create(&d, n.id, written_tag(tag))
+            match tag_refused(tag) {
+              None => #()
+              Some(why) => dom_attr(&d, n.id, "hidden", "")
+            }
+          }
+          Island(name, props, inner) => dom_island(&d, n.id, name, props, trusted_text(inner))
+          Trusted(html) => dom_trusted(&d, n.id, trusted_text(html))
+          // A refused SVG tag is made as an HTML element that shows nothing.
+          Svg(tag) => if svg_tag_ok(tag) { dom_svg(&d, n.id, tag) } else {
+            dom_create(&d, n.id, "delim-refused")
+            dom_attr(&d, n.id, "hidden", "")
+          }
+        }
+        CreateText(n, s) => dom_text(&d, n.id, s)
+        CreateGroup(n) => dom_group(&d, n.id)
+        SetProp(n, a) => set_attr(&d, n.id, a)
+        SetText(n, s) => dom_set_text(&d, n.id, s)
+        Append(parent, c) => dom_append(&d, parent.id, c.id)
+        InsertBefore(parent, c, b) => dom_insert_before(&d, parent.id, c.id, b.id)
+        Remove(n) => dom_remove(&d, n.id)
+        // Each instance is built from its own patches; copying the first is left for later.
+        Template(id, n) => #()
+      }
+      apply(&d, rest)
+    }
+  }
+}
+
+fn event_kind(code: u64, s: Text): EventKind {
+  if code == 0 { Press } else if code == 1 { Focus } else if code == 2 { Blur } else if code == 3 {
+    Key
+  } else if code == 4 { Edit } else if code == 5 { PointerEnter } else if code == 6 {
+    PointerLeave
+  } else if code == 7 { PointerDown } else if code == 8 { PointerMove } else if code == 9 {
+    PointerUp
+  } else if code == 10 { Scroll } else if code == 12 { Submit } else if code == 13 {
+    DragStart
+  } else if code == 14 { DragMove } else if code == 15 { DragEnd } else if code == 16 { Drop } else if code == 17 {
+    KeyUp
+  } else if code == 18 { DoubleClick } else if code == 19 { ContextMenu } else if code == 20 {
+    Wheel
+  } else if code == 21 { Paste } else {
+    NamedAction(s)
+  }
+}
+
+fn event_data(code: u64, s: Text, x: i64, y: i64, b: i64): EventData {
+  if code == 3 || code == 17 { KeyData(s) } else if code == 4 || code == 21 { TextData(s) } else if (code >= 5 && code <= 9) || (code >= 13 && code <= 16) {
+    Pointer(x, y, b)
+  } else if code == 10 || code == 20 { ScrollData(x, y) } else if code == 18 || code == 19 {
+    Pointer(x, y, b)
+  } else { NoData }
+}
+
+// The number of the nearest node from `n` up, under the root, that is in `ns`; 0 if none.
+fn nearest_of(d: &Doc, n: u32, ns: List(u32)): u32 ! {div, overflow, wait} {
+  if n == 0 || has_id(ns, n) { n } else { nearest_of(&d, dom_parent(&d, n), ns) }
+}
+
+fn has_id(l: List(u32), n: u32): Bool ! {div, overflow} {
+  match l {
+    Nil => false
+    Cons(x, rest) => x == n || has_id(rest, n)
+  }
+}
+
+// An event that bubbles goes to the nearest node, from the one it happened on up, that has a
+// handler for it; only that node's handlers run. Others go to the node.
+fn deliver(
+  d: &Doc,
+  t: Tree(HtmlKind, HtmlAttr),
+  n: u32,
+  k: EventKind,
+  data: EventData
+): Unit ! {rt, div, overflow, wait} {
+  if bubbles(k) {
+    match handler_nodes(t, k) {
+      Nil => #()
+      Cons(x, rest) => {
+        let m := nearest_of(&d, n, Cons(x, rest))
+        if m == 0 { #() } else { fire(t, Node { id: m }, k, data) }
+      }
+    }
+  } else { fire(t, Node { id: n }, k, data) }
+}
+
+// Loads the resource `key` in a task of its own and gives `k` what came: the caller goes on at
+// once, and `k` may wait.
+pub fn load_then(
+  d: &Doc,
+  key: Text,
+  k: (
+    ok: Bool,
+    s: Text
+  ) -> Unit ! {
+    div,
+    overflow,
+    wait,
+    cells,
+    ∀ T. spawn(
+      () -> T ! {
+        hash_seed,
+        ref_new,
+        ref_get,
+        ref_set,
+        weak_of,
+        weak_get,
+        mutex_new,
+        mutex_claim,
+        mutex_take_claimed,
+        mutex_put
+      }
+    )
+  }
+): Unit ! {
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  Task::detach(perform spawn(() => {
+    let r := dom_load(&d, key)
+    k(host_load_ok(&r), host_load_text(&r))
+  }))
+}
+
+// Loads each resource the tree wants, and applies what its arrival changes.
+fn load_wants(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr)): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  load_each(d, r, t, with_runtime(r, () => take_wants()))
+}
+
+fn load_each(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr), ws: List(Want)): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  match ws {
+    Nil => #()
+    Cons(w, rest) => {
+      load_then(&d, w.key, (ok: Bool, s: Text) => {
+        with_runtime(r, () => if ok { resolve(w, s) } else { reject(w, s) })
+        follow(d, r, t)
+      })
+      load_each(d, r, t, rest)
+    }
+  }
+}
+
+// Starts each timer the tree asked for since the last call. A timer whose owner ended does not
+// run; one made by `every` starts again after each run.
+fn start_timers(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr)): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  start_each(d, r, t, with_runtime(r, () => take_timers()))
+}
+
+fn start_each(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr), ts: List(Timer)): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  match ts {
+    Nil => #()
+    Cons(x, rest) => {
+      arm(d, r, t, x)
+      start_each(d, r, t, rest)
+    }
+  }
+}
+
+fn arm(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr), x: Timer): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  Task::detach(perform spawn(() => ring(d, r, t, x)))
+}
+
+fn ring(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr), x: Timer): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  if dom_sleep(&d, x.ms) && perform ref_get(x.live) {
+    with_runtime(r, () => x.run())
+    follow(d, r, t)
+    if x.every && perform ref_get(x.live) { ring(d, r, t, x) } else { #() }
+  } else { #() }
+}
+
+// What a call into the program changed: its patches go to the page, the resources and timers
+// it asked for start, and what it got wrong is told.
+fn follow(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr)): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  apply(&d, take_patches(t))
+  load_wants(d, r, t)
+  start_timers(d, r, t)
+  report(d, r, t)
+}
+
+// Tells the page of each watcher that writes stopped running and each key two items of one
+// list had, since the last call. Without this they would go by unseen: the page would just
+// stop following a signal, or leave out a row.
+fn report(d: Doc, r: Runtime, t: Tree(HtmlKind, HtmlAttr)): Unit ! {div, overflow, wait, cells} {
+  warn_each(
+    &d,
+    "stalled",
+    "a watcher was run too many times by one write and is stopped: ",
+    with_runtime(r, () => take_stalled())
+  )
+  warn_each(&d, "duplicate key", "two items of one list have the key ", take_duplicate_keys(t))
+}
+
+fn warn_each(d: &Doc, kind: Text, what: Text, ids: List(u64)): Unit ! {div, overflow, wait} {
+  match ids {
+    Nil => #()
+    Cons(id, rest) => {
+      dom_warn(&d, kind, concat(what, decimal(id)))
+      warn_each(&d, kind, what, rest)
+    }
+  }
+}
+
+fn run_view(
+  d: Doc,
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow}
+): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  let t := tree()
+  let r := reactive(() => {
+    let r := current()
+    let root := draw(t, web_vocab())
+    apply(&d, take_patches(t))
+    dom_mount(&d, root.id)
+    dom_settle(&d)
+    load_wants(d, r, t)
+    start_timers(d, r, t)
+    report(d, r, t)
+    r
+  })
+  // Listen outside reactive's borrowed body so the task owns its tree/runtime captures
+  // rather than references into that temporary call. The patches of the watchers an event
+  // makes stale are applied after its batch. The events go on for as long as the page lives: the listening is never stopped.
+  let l := listen(&d, (ev: DomEvent) => {
+    with_runtime(r, () => deliver(&d, t, ev.node, event_kind(ev.kind, ev.text), event_data(ev.kind, ev.text, ev.x, ev.y, ev.button)))
+    follow(d, r, t)
+  })
+  match l { Listening { d, task } => Task::detach(task) }
+}
+
+// Builds `view` into the element `selector` names, and keeps it following its signals and
+// answering events for as long as the page lives.
+pub fn mount_in(
+  selector: Text,
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div, overflow}
+): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  run_view(dom_root(selector), draw)
+}
+
+// Builds `app`, which takes its tree from `ui`, into the element `selector` names.
+pub fn mount(selector: Text, app: () -> Node ! {Delim}): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  mount_in(
+    selector,
+    (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => with_ui(t, v, app)
+  )
+}
+
+// Takes over the island named `name` that `island` rendered on the server with the same
+// `view`: the view runs again from the island's props, and its nodes are the page's own.
+pub fn hydrate(
+  name: Text,
+  draw: (
+    t: Tree(HtmlKind, HtmlAttr),
+    v: Vocab(HtmlKind, HtmlAttr),
+    props: Text
+  ) -> Node ! {rt, div, overflow}
+): Unit ! {
+  div,
+  overflow,
+  wait,
+  cells,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  )
+} {
+  let d := dom_hydrate_root(concat(concat("delim-island[data-name=\"", name), "\"]"))
+  let props := dom_props(&d)
+  run_view(d, (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => draw(t, v, props))
+}

@@ -1,0 +1,218 @@
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+import "../../src/signal.taut" {
+  cells,
+  current,
+  dispose,
+  get,
+  memo,
+  memo_eq,
+  on_cleanup,
+  peek,
+  reactive,
+  recover,
+  scope,
+  set,
+  signal,
+  take_failures,
+  take_stalled,
+  untracked,
+  watch
+}
+
+fn log_push(l: Ref(List(i64)), x: i64): Unit ! {div, cells} {
+  perform ref_set(l, Cons(x, perform ref_get(l)))
+}
+
+// Whether `l` is exactly `[a, b, c]`.
+fn is3(l: List(i64), a: i64, b: i64, c: i64): Bool ! {div} {
+  match l {
+    Nil => false
+    Cons(x, t) => x == a && is2(t, b, c)
+  }
+}
+
+fn is2(l: List(i64), b: i64, c: i64): Bool ! {div} {
+  match l {
+    Nil => false
+    Cons(x, t) => x == b && is1(t, c)
+  }
+}
+
+fn is1(l: List(i64), c: i64): Bool {
+  match l {
+    Nil => false
+    Cons(x, t) => match t {
+      Nil => x == c
+      Cons(y, u) => false
+    }
+  }
+}
+
+fn count(l: List(i64)): i64 ! {div, overflow} {
+  match l {
+    Nil => 0
+    Cons(x, t) => 1 + count(t)
+  }
+}
+
+fn head_or(l: List(i64), d: i64): i64 {
+  match l {
+    Nil => d
+    Cons(x, t) => x
+  }
+}
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("signal", () => {
+  assert_case("a watcher runs once and again on each write", reactive(() => {
+    let s := signal(1)
+    let seen := perform ref_new(Nil)
+    watch(() => log_push(seen, get(s)))
+    set(s, 2)
+    set(s, 3)
+    is3(perform ref_get(seen), 3, 2, 1)
+  }))
+  assert_case("a memo follows its source", reactive(() => {
+    let s := signal(2)
+    let double := memo(() => get(s) * 2)
+    let seen := perform ref_new(Nil)
+    watch(() => log_push(seen, get(double)))
+    set(s, 5)
+    get(double) == 10 && head_or(perform ref_get(seen), 0) == 10 && count(perform ref_get(seen)) == 2
+  }))
+  assert_case("a watcher that reads a signal twice runs once per write", reactive(() => {
+    let s := signal(1)
+    let runs := perform ref_new(Nil)
+    watch(() => log_push(runs, get(s) + get(s)))
+    set(s, 2)
+    count(perform ref_get(runs)) == 2 && head_or(perform ref_get(runs), 0) == 4
+  }))
+  assert_case("a watcher follows only what its last run read", reactive(() => {
+    let flag := signal(true)
+    let a := signal(1)
+    let b := signal(10)
+    let runs := perform ref_new(Nil)
+    watch(() => log_push(runs, if get(flag) { get(a) } else { get(b) }))
+    set(flag, false)
+    set(a, 2)
+    let after_a := count(perform ref_get(runs))
+    set(b, 20)
+    after_a == 2 && count(perform ref_get(runs)) == 3 && head_or(perform ref_get(runs), 0) == 20
+  }))
+  assert_case("peek and untracked do not subscribe", reactive(() => {
+    let s := signal(1)
+    let t := signal(1)
+    let runs := perform ref_new(Nil)
+    watch(() => log_push(runs, peek(s) + untracked(() => get(t))))
+    set(s, 2)
+    set(t, 2)
+    count(perform ref_get(runs)) == 1
+  }))
+  assert_case("an inner watcher ends when its outer watcher runs again", reactive(() => {
+    let outer := signal(0)
+    let inner := signal(0)
+    let runs := perform ref_new(Nil)
+    watch(() => {
+      let o := get(outer)
+      watch(() => log_push(runs, o * 100 + get(inner)))
+    })
+    set(outer, 1)
+    set(inner, 5)
+    // inner runs: 0 (first), 100 (new inner after outer), 105; the disposed first one does not run.
+    count(perform ref_get(runs)) == 3 && head_or(perform ref_get(runs), 0) == 105
+  }))
+  assert_case("cleanups run before a rerun and on dispose, newest first", reactive(() => {
+    let s := signal(0)
+    let log := perform ref_new(Nil)
+    let made := scope(() => {
+      watch(() => {
+        let v := get(s)
+        on_cleanup(() => log_push(log, v))
+      })
+      on_cleanup(() => log_push(log, 0 - 1))
+    })
+    set(s, 1)
+    dispose(made.owner)
+    set(s, 2)
+    // cleanup of run 0, then of run 1 (watcher disposed), then the scope's own.
+    is3(perform ref_get(log), 0 - 1, 1, 0)
+  }))
+  assert_case("a scope can return u64 independently of its owner and disposes its watchers", reactive(() => {
+    let source := signal(1)
+    let runs := perform ref_new(0)
+    let cleaned := perform ref_new(false)
+    let made := scope(() => {
+      watch(() => {
+        let value := get(source)
+        perform ref_set(runs, perform ref_get(runs) + 1)
+      })
+      on_cleanup(() => perform ref_set(cleaned, true))
+      let value: u64 := 42
+      value
+    })
+    set(source, 2)
+    let before := perform ref_get(runs)
+    dispose(made.owner)
+    set(source, 3)
+    made.value == 42 && before == 2 && perform ref_get(runs) == 2 && perform ref_get(cleaned)
+  }))
+  assert_case("a watcher below two memos of one signal runs once and sees both", reactive(() => {
+    let s := signal(1)
+    let a := memo(() => get(s) + 1)
+    let b := memo(() => get(s) * 10)
+    let runs := perform ref_new(Nil)
+    watch(() => log_push(runs, get(a) + get(b)))
+    set(s, 2)
+    count(perform ref_get(runs)) == 2 && head_or(perform ref_get(runs), 0) == 23
+  }))
+  assert_case("a memo_eq that gives the same value does not run its readers", reactive(() => {
+    let s := signal(1)
+    let parity := memo_eq(() => mod(get(s), 2) == 1)
+    let runs := perform ref_new(Nil)
+    watch(() => log_push(runs, if get(parity) { 1 } else { 0 }))
+    set(s, 3)
+    let after_same := count(perform ref_get(runs))
+    set(s, 4)
+    after_same == 1 && count(perform ref_get(runs)) == 2 && head_or(perform ref_get(runs), 9) == 0
+  }))
+  assert_case("recover ends a write the host abandoned, so later writes run watchers again", reactive(() => {
+    let s := signal(0)
+    let runs := perform ref_new(0)
+    watch(() => {
+      let n := get(s)
+      perform ref_set(runs, perform ref_get(runs) + 1)
+    })
+    // What a host exception thrown inside a watcher leaves behind: a write still flushing.
+    let r := current()
+    perform ref_set(r.flushing, true)
+    set(s, 1)
+    let stuck := perform ref_get(runs) == 1
+    recover("thrown")
+    set(s, 2)
+    let failures := take_failures()
+    stuck && perform ref_get(runs) == 2 && failures == Cons("thrown", Nil) && take_failures() == Nil && match take_stalled() {
+        Nil => false
+        Cons(w, rest) => rest == Nil
+      }
+  }))
+  assert_case("a watcher that writes what it reads stops at the run limit and runs again later", reactive(() => {
+    let s := signal(0)
+    let runs := perform ref_new(0)
+    watch(() => {
+      let n := get(s)
+      perform ref_set(runs, perform ref_get(runs) + 1)
+      if n < 1000 { set(s, n + 1) } else { #() }
+    })
+    let stopped := perform ref_get(runs) == 101 && peek(s) == 101
+    let named := match take_stalled() {
+      Nil => false
+      Cons(w, rest) => match rest {
+        Nil => true
+        Cons(x, more) => false
+      }
+    }
+    set(s, 5000)
+    stopped && named && perform ref_get(runs) == 102 && take_stalled() == Nil
+  }))
+})

@@ -1,0 +1,323 @@
+import std::builtin::os { stdout }
+import "../../../../delim-html/src/html-view.taut" { view }
+import "../../../src/signal.taut" {
+  Load,
+  Signal,
+  dispose,
+  get,
+  on_cleanup,
+  reactive,
+  rt,
+  scope,
+  set,
+  set_eq,
+  signal,
+  watch
+}
+import "../../../src/tree.taut" {
+  Node,
+  Patch,
+  Prop,
+  Tree,
+  el,
+  keyed_each,
+  keyed_each_signal,
+  take_duplicate_keys,
+  take_patches,
+  text,
+  text_dyn,
+  tree
+}
+import "../../../src/resource.taut" {
+  cancel_resource,
+  reject,
+  reload,
+  reloadable,
+  reloadable_in,
+  resolve,
+  resource,
+  resource_state,
+  suspense_in,
+  take_wants
+}
+import "../../../../delim-html/src/html.taut" { render_html_in, render_html_loading }
+import "../../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../../src/common.taut" { Vocab }
+import std::builtin::par { ref_get, ref_new, ref_set }
+
+// `name` and what `a` is shown as, on a line of standard output.
+fn say<A: Shared>(name: Text, a: A): Unit ! {Show} where Debug(A) {
+  perform stdout(concat(name, concat(": ", concat(debug(&a), "\n"))))
+}
+
+fn check(name: Text, ok: Bool): Unit ! {Show} {
+  if ok { say(name, "ok") } else { say(name, "FAILED") }
+}
+
+fn bool_markup(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  view!(```
+    $t <input checked=${true} required=${true} readonly=${true} hidden=${false}/>
+    ```)
+}
+
+fn creates_text(ps: List(Patch(Text, Text)), s: Text): Bool {
+  match ps {
+    Nil => false
+    Cons(p, rest) => match p {
+      CreateText(n, x) => x == s || creates_text(rest, s)
+      Create(_, _) => creates_text(rest, s)
+      CreateGroup(_) => creates_text(rest, s)
+      SetProp(_, _) => creates_text(rest, s)
+      SetText(_, _) => creates_text(rest, s)
+      Append(_, _) => creates_text(rest, s)
+      InsertBefore(_, _, _) => creates_text(rest, s)
+      Remove(_) => creates_text(rest, s)
+      Template(_, _) => creates_text(rest, s)
+    }
+  }
+}
+
+fn removes(ps: List(Patch(Text, Text))): Bool {
+  match ps {
+    Nil => false
+    Cons(p, rest) => match p {
+      Remove(n) => true
+      Create(_, _) => removes(rest)
+      CreateText(_, _) => removes(rest)
+      CreateGroup(_) => removes(rest)
+      SetProp(_, _) => removes(rest)
+      SetText(_, _) => removes(rest)
+      Append(_, _) => removes(rest)
+      InsertBefore(_, _, _) => removes(rest)
+      Template(_, _) => removes(rest)
+    }
+  }
+}
+
+// Whether `ps` is exactly one `SetText` of `want`.
+fn sole_set_text(ps: List(Patch(Text, Text)), want: Text): Bool {
+  match ps {
+    Nil => false
+    Cons(p, more) => match more {
+      Cons(_, _) => false
+      Nil => match p {
+        SetText(n, s) => s == want
+        Create(_, _) => false
+        CreateText(_, _) => false
+        CreateGroup(_) => false
+        SetProp(_, _) => false
+        Append(_, _) => false
+        InsertBefore(_, _, _) => false
+        Remove(_) => false
+        Template(_, _) => false
+      }
+    }
+  }
+}
+
+perform main(() => {
+  check("set_eq skips equal writes and does not subscribe its caller", reactive(() => {
+    let s := signal(1)
+    let runs := perform ref_new(0)
+    let writer := perform ref_new(0)
+    watch(() => { let v := get(s)
+      perform ref_set(runs, perform ref_get(runs) + 1) })
+    watch(() => { set_eq(s, 1)
+      perform ref_set(writer, perform ref_get(writer) + 1) })
+    set_eq(s, 1)
+    set_eq(s, 2)
+    perform ref_get(runs) == 2 && perform ref_get(writer) == 1
+  }))
+  check("keyed_each_signal updates a retained row without rebuilding it", reactive(() => {
+    let t: Tree(Text, Text) := tree()
+    let items := signal([1])
+    let builds := perform ref_new(0)
+    let g := keyed_each_signal(t, () => get(items), (x: i64) => U64::of_i64(0), (item: delim::src::signal::Signal(i64)) => {
+      perform ref_set(builds, perform ref_get(builds) + 1)
+      text_dyn(t, () => Text::of_i64(get(item)))
+    })
+    let initial := take_patches(t)
+    set(items, [2])
+    let patches := take_patches(t)
+    perform ref_get(builds) == 1 && sole_set_text(patches, "2")
+  }))
+  check("boolean form properties write presence and omit false values", render_html_in((t, v) =>
+    el(t, Tag("input"), [Static(Checked(true)), Static(Required(true)), Static(ReadOnly(false)), Static(Hidden(false))], Nil)
+  ) == "<input checked required>")
+  check("textarea Value is escaped body text and preserves a leading newline", render_html_in((t, v) =>
+    el(t, Tag("textarea"), [Static(Value("\n<&"))], Nil)
+  ) == "<textarea value=\"\n&lt;&amp;\">\n\n&lt;&amp;</textarea>")
+  check("select Value selects the matching option under an optgroup", render_html_in((t, v) =>
+    el(t, Tag("select"), [Static(Value("b"))], [
+      el(t, Tag("option"), [Static(Value("a")), Static(Selected(true))], [text(t, "A")]),
+      el(t, Tag("optgroup"), Nil, [el(t, Tag("option"), [Static(Value("b"))], [text(t, "B")])])
+    ])
+  ) == "<select value=\"b\"><option value=\"a\">A</option><optgroup><option value=\"b\" selected>B</option></optgroup></select>")
+  check("reloadable rejects stale responses and cancellation wins over late delivery", reactive(() => {
+    let r := reloadable()
+    reload(r, "old")
+    let old := take_wants()
+    reload(r, "new")
+    let fresh := take_wants()
+    match old {
+      Cons(w, Nil) => resolve(w, "stale")
+      Nil => #()
+      Cons(_, Cons(_, _)) => #()
+    }
+    let pending := match get(resource_state(r)) { Loading => true
+      Loaded(_) => false
+      LoadFailed(_) => false }
+    match fresh { Cons(w, Nil) => resolve(w, "fresh")
+      Nil => #()
+      Cons(_, Cons(_, _)) => #() }
+    let latest := match get(resource_state(r)) { Loaded(v) => v == "fresh"
+      Loading => false
+      LoadFailed(_) => false }
+    reload(r, "cancel")
+    let cancelled := take_wants()
+    cancel_resource(r)
+    match cancelled { Cons(w, Nil) => resolve(w, "late")
+      Nil => #()
+      Cons(_, Cons(_, _)) => #() }
+    pending && latest && match get(resource_state(r)) { LoadFailed(why) => true
+      Loading => false
+      Loaded(_) => false }
+  }))
+  check("a reloadable stops delivery and new requests after owner disposal", reactive(() => {
+    let made := scope(() => reloadable())
+    reload(made.value, "pending")
+    let wants := take_wants()
+    dispose(made.owner)
+    match wants { Cons(w, Nil) => resolve(w, "late")
+      Nil => #()
+      Cons(_, Cons(_, _)) => #() }
+    reload(made.value, "after disposal")
+    let no_request := match take_wants() { Nil => true
+      Cons(_, _) => false }
+    no_request && match get(resource_state(made.value)) { Loading => true
+      Loaded(_) => false
+      LoadFailed(_) => false }
+  }))
+  check("a completed reloadable keeps its result when cancelled and can be loaded again", reactive(() => {
+    let r := reloadable()
+    reload(r, "first")
+    match take_wants() { Cons(w, Nil) => resolve(w, "done")
+      Nil => #()
+      Cons(_, Cons(_, _)) => #() }
+    cancel_resource(r)
+    let kept := match get(resource_state(r)) { Loaded(v) => v == "done"
+      Loading => false
+      LoadFailed(_) => false }
+    reload(r, "second")
+    match take_wants() { Cons(w, Nil) => reject(w, "failed")
+      Nil => #()
+      Cons(_, Cons(_, _)) => #() }
+    kept && match get(resource_state(r)) { LoadFailed(why) => why == "failed"
+      Loading => false
+      Loaded(_) => false }
+  }))
+  check("OptionalAttr clears an attribute after a resource update", render_html_loading((t, v) => {
+    let r := resource(t, "title")
+    el(t, Tag("p"), [Dyn(() => OptionalAttr("title", match get(r) {
+      Loading => Some("waiting")
+      Loaded(_) => None
+      LoadFailed(_) => None
+    }))], [text(t, "text")])
+  }, (key: Text) => Ok("ready")) == "<p>text</p>")
+  check("duplicate key diagnostics keep first-item behavior and drain on read", reactive(() => {
+    let t: Tree(Text, Text) := tree()
+    let items := signal([1, 1, 1])
+    let built := perform ref_new(0)
+    let g := keyed_each(t, () => get(items), (x: i64) => U64::of_i64(x), (x: i64) => {
+      perform ref_set(built, perform ref_get(built) + 1)
+      text(t, Text::of_i64(x))
+    })
+    let reported := match take_duplicate_keys(t) { Cons(k, Nil) => k == 1
+      Nil => false
+      Cons(_, Cons(_, _)) => false }
+    let drained := match take_duplicate_keys(t) { Nil => true
+      Cons(_, _) => false }
+    set(items, [2, 2])
+    reported && drained && perform ref_get(built) == 2 && match take_duplicate_keys(t) {
+      Cons(k, Nil) => k == 2
+      Nil => false
+      Cons(_, Cons(_, _)) => false
+    }
+  }))
+  check("keyed_each_signal disposes row subscriptions with its owner", reactive(() => {
+    let t: Tree(Text, Text) := tree()
+    let items := signal([1])
+    let builds := perform ref_new(0)
+    let cleanups := perform ref_new(0)
+    let made := scope(() => keyed_each_signal(t, () => get(items), (x: i64) => U64::of_i64(0), (item: delim::src::signal::Signal(i64)) => {
+      perform ref_set(builds, perform ref_get(builds) + 1)
+      on_cleanup(() => perform ref_set(cleanups, perform ref_get(cleanups) + 1))
+      text_dyn(t, () => Text::of_i64(get(item)))
+    }))
+    let initial := take_patches(t)
+    set(items, [2])
+    let changed := take_patches(t)
+    dispose(made.owner)
+    let disposed := take_patches(t)
+    set(items, [3])
+    perform ref_get(builds) == 1 && perform ref_get(cleanups) == 1 && match take_patches(t) {
+      Nil => true
+      Cons(_, _) => false
+    }
+  }))
+  check("view! binds Bool form properties", render_html_in(bool_markup) == "<input checked required readonly>")
+  check("a suspense boundary shows its fallback again while a reloadable_in loads again", reactive(() => {
+    let t: Tree(Text, Text) := tree()
+    let made := perform ref_new(None)
+    let g := suspense_in(t, () => text(t, "wait"), () => {
+      let r := reloadable_in(t)
+      perform ref_set(made, Some(r))
+      reload(r, "a")
+      text(t, "body")
+    })
+    match perform ref_get(made) {
+      None => false
+      Some(r) => {
+        let first := creates_text(take_patches(t), "wait")
+        match take_wants() { Cons(w, Nil) => resolve(w, "1")
+          Nil => #()
+          Cons(_, Cons(_, _)) => #() }
+        let shown := removes(take_patches(t))
+        reload(r, "a")
+        let again := creates_text(take_patches(t), "wait")
+        // A superseded load ends the wait for it: only the newest counts.
+        reload(r, "a")
+        let stale := take_wants()
+        let kept := removes(take_patches(t)) == false
+        match stale { Cons(old, Cons(w, Nil)) => resolve(w, "2")
+          Nil => #()
+          Cons(_, Nil) => #()
+          Cons(_, Cons(_, Cons(_, _))) => #() }
+        let done := removes(take_patches(t))
+        first && shown && again && kept && done
+      }
+    }
+  }))
+  check("a cancelled reloadable_in ends its boundary's wait", reactive(() => {
+    let t: Tree(Text, Text) := tree()
+    let made := perform ref_new(None)
+    let g := suspense_in(t, () => text(t, "wait"), () => {
+      let r := reloadable_in(t)
+      perform ref_set(made, Some(r))
+      reload(r, "a")
+      text(t, "body")
+    })
+    let ps := take_patches(t)
+    match perform ref_get(made) {
+      None => false
+      Some(r) => {
+        cancel_resource(r)
+        let wants := take_wants()
+        let shown := removes(take_patches(t))
+        shown && match get(resource_state(r)) { LoadFailed(why) => true
+          Loading => false
+          Loaded(_) => false }
+      }
+    }
+  }))
+})

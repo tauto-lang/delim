@@ -1,0 +1,46 @@
+import "../../delim/src/signal.taut" { rt }
+import "../../delim/src/common.taut" { Vocab }
+import "../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../delim/src/tree.taut" { Node, Tree }
+import "site.taut" { Head, Page }
+
+// Nested layouts. A `Frame` is what pages of one section share: head entries and a wrapper
+// around the page's own view. Frames nest: `nested(outer, inner)` puts the inner frame's
+// wrapper inside the outer one, so a site's shell, a section's nav and a page build one tree
+// and share one suspense and one set of resources.
+
+pub(open) struct Frame {
+  head: List(Head),
+  wrap: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr), inner: Node) -> Node ! {rt, div}
+}
+
+fn heads_then(a: List(Head), b: List(Head)): List(Head) {
+  match a {
+    Nil => b
+    Cons(h, rest) => Cons(h, heads_then(rest, b))
+  }
+}
+
+// `p` inside `f`: `f`'s head entries come first, the title and language stay `p`'s.
+pub fn framed(f: Frame, p: Page): Page {
+  Page {
+    title: p.title,
+    lang: p.lang,
+    head: heads_then(f.head, p.head),
+    view: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => {
+      let inner := (p.view)(t, v)
+      (f.wrap)(t, v, inner)
+    }
+  }
+}
+
+// A frame that puts `inner`'s result inside `outer`'s wrapper.
+pub fn nested(outer: Frame, inner: Frame): Frame {
+  Frame {
+    head: heads_then(outer.head, inner.head),
+    wrap: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr), n: Node) => {
+      let mid := (inner.wrap)(t, v, n)
+      (outer.wrap)(t, v, mid)
+    }
+  }
+}

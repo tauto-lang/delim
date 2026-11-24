@@ -1,0 +1,8 @@
+package {
+  name = "delim-html"
+  version = "0.1.0"
+}
+
+dependencies {
+  delim { path = "../delim" }
+}

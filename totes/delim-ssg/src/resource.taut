@@ -1,0 +1,52 @@
+import "codec.taut" { Codec }
+import "../../delim/src/tree.taut" { Tree }
+import "../../delim/src/signal.taut" { Load, get, memo, rt }
+import "../../delim/src/resource.taut" { resource }
+import "../../delim/src/handle.taut" { Resource, ResourceState, resource_handle }
+
+// The data a page reads while it is written: a key the view asks for, and how its value is
+// written as text.
+pub(open) struct Res(B: Type) { key: Text, value: Codec(B) }
+
+// What `generate` runs for a key, with the value's type erased by the codec. It may perform
+// the effects `e` besides `Div`, such as reading files.
+pub struct(shared) Answer(!e) { name: Text, run: () -> Result(Text, Text) ! {overflow, div} ∪ e }
+
+// The loader of `r`. An `Err` stops `generate`, with its reason.
+pub fn loading<B: Shared, !e>(
+  r: Res(B),
+  run: () -> Result(B, Text) ! {overflow, div} ∪ e
+): Answer(!e) {
+  Answer {
+    name: r.key,
+    run: () => match run() {
+      Ok(b) => Ok((r.value.encode)(b))
+      Err(why) => Err(why)
+    }
+  }
+}
+
+// Runs the loader named `name`; a name no loader has is refused.
+pub fn load<!e>(l: List(Answer(!e)), name: Text): Result(Text, Text) ! {overflow, div} ∪ e {
+  match l {
+    Nil => Err("no resource has this key")
+    Cons(a, rest) => if a.name == name { (a.run)() } else { load(rest, name) }
+  }
+}
+
+// The value of `r` in the page being written on `t`: pending until `generate` has loaded it,
+// then the decoded value. A value that does not decode is a failure.
+pub fn use_res_in_tree<K: Shared, P: Shared, B: Shared>(
+  t: Tree(K, P),
+  r: Res(B)
+): Resource(B, Text) ! {rt, div} {
+  let source := resource(t, r.key)
+  resource_handle(memo(() => match get(source) {
+    Loading => Pending
+    Loaded(value) => match (r.value.decode)(value) {
+      Some(b) => Ready(b)
+      None => Failed(concat(r.key, ": the value does not decode"))
+    }
+    LoadFailed(why) => Failed(why)
+  }))
+}

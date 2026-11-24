@@ -1,0 +1,242 @@
+import std::builtin::os { hash_seed }
+import std::builtin::par {
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  spawn,
+  wait,
+  weak_get,
+  weak_of
+}
+import "../../../delim/src/common.taut" { Vocab }
+import "../../src/markup.taut" { HtmlAttr, HtmlKind, decimal }
+import "../../../delim/src/resource.taut" { resource, suspense_in }
+import "../../../delim/src/signal.taut" { Load, cells, get, peek, rt, set, signal, update }
+import "../../../delim/src/tree.taut" { EventData, EventKind, Node, Prop, Tree, el, text, text_dyn }
+import "../../../delim/src/widgets.taut" { button, column }
+import "dom.taut" { hydrate, mount_in }
+import "../../src/html.taut" { island, render_html_in }
+
+fn parse_from(t: Text, i: u64, acc: u64): u64 ! {div, overflow} {
+  match Text::byte(t, i) {
+    None => acc
+    Some(b) => {
+      let c := U64::of_u8(b)
+      if c >= 48 && c <= 57 { parse_from(t, i + 1, acc * 10 + c - 48) } else { acc }
+    }
+  }
+}
+
+// A counter, the example the renderer is checked with in a browser.
+fn counter(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div, overflow} {
+  counter_from(t, v, "0")
+}
+
+// A counter starting from the number `props` is.
+fn counter_from(
+  t: Tree(HtmlKind, HtmlAttr),
+  v: Vocab(HtmlKind, HtmlAttr),
+  props: Text
+): Node ! {rt, div, overflow} {
+  let n := signal(parse_from(props, 0, 0))
+  column(
+    t,
+    v,
+    Cons(Static(Attr("id", "counter")), Nil),
+    Cons(
+      el(t, Tag("output"), Nil, Cons(text_dyn(t, () => decimal(get(n))), Nil)),
+      Cons(
+        button(
+          t,
+          v,
+          "Increment",
+          () => update(n, (x: u64) => handle { x + 1 } with { overflow() => x })
+        ),
+        Cons(button(t, v, "Reset", () => set(n, 0)), Nil)
+      )
+    )
+  )
+}
+
+fn start(): Unit ! {
+  div,
+  wait,
+  hash_seed,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  ),
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of
+} { handle { mount_in("#app", counter) } with { overflow() => #() } }
+
+// A page as the server renders it: static text around a counter island starting at 5.
+fn island_page(): Text ! {div, wait, cells} {
+  handle {
+    render_html_in(
+      (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => column(
+        t,
+        v,
+        Nil,
+        Cons(
+          el(t, Tag("h1"), Nil, Cons(text(t, "Static"), Nil)),
+          Cons(island(t, "counter", "5", counter_from), Nil)
+        )
+      )
+    )
+  } with { overflow() => "" }
+}
+
+// A greeting that waits for the resource `name`.
+fn greeting(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div, overflow} {
+  suspense_in(t, () => text(t, "Loading…"), () => {
+    let r := resource(t, "name")
+    el(t, Tag("p"), Nil, Cons(text_dyn(t, () => match get(r) {
+      Loading => ""
+      Loaded(name) => concat("Hello, ", name)
+      LoadFailed(why) => why
+    }), Nil))
+  })
+}
+
+fn start_loading(): Unit ! {
+  div,
+  wait,
+  hash_seed,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  ),
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of
+} { handle { mount_in("#app", greeting) } with { overflow() => #() } }
+
+// Exercises both directions of the followed disabled property.
+fn disabled_controls(
+  t: Tree(HtmlKind, HtmlAttr),
+  v: Vocab(HtmlKind, HtmlAttr)
+): Node ! {rt, div, overflow, cells} {
+  let disabled := signal(true)
+  let count := signal(0)
+  column(
+    t,
+    v,
+    Nil,
+    [
+      el(
+        t,
+        Tag("button"),
+        [
+          Static(Attr("id", "disabled-target")),
+          Static(Attr("aria-label", "Target")),
+          Dyn(() => Disabled(get(disabled))),
+          On(
+            Press,
+            (d: EventData) => update(count, (n) => handle { n + 1 } with { overflow() => n })
+          )
+        ],
+        [text(t, "Target")]
+      ),
+      button(t, v, "Toggle disabled", () => set(disabled, not(peek(disabled)))),
+      el(t, Tag("output"), Nil, [text_dyn(t, () => Text::of_i64(get(count)))])
+    ]
+  )
+}
+
+fn start_disabled(): Unit ! {
+  div,
+  wait,
+  hash_seed,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  ),
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of
+} { handle { mount_in("#app", disabled_controls) } with { overflow() => #() } }
+
+fn start_island(): Unit ! {
+  div,
+  wait,
+  hash_seed,
+  ∀ T. spawn(
+    () -> T ! {
+      hash_seed,
+      ref_new,
+      ref_get,
+      ref_set,
+      weak_of,
+      weak_get,
+      mutex_new,
+      mutex_claim,
+      mutex_take_claimed,
+      mutex_put
+    }
+  ),
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of
+} { handle { hydrate("counter", counter_from) } with { overflow() => #() } }
+
+#()

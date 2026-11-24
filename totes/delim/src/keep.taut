@@ -1,0 +1,118 @@
+import "signal.taut" { rt }
+import "tree.taut" { Node, Tree }
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+
+// Keeping a part of a view to run later (a handler when its event fires, a part built again
+// when the signals it reads change) under the handlers that stood where it was kept: the
+// contexts `with_context` gave, the tree `ui` gave. `keep` takes the rest of the build as a
+// continuation, so a part run later sees what the build saw, without each handler being
+// lifted by hand.
+
+pub(open) enum Kept { KNode(Node), KUnit, KNone }
+// What `fork` answers: in the part that goes on building, how to run the kept part again.
+pub(open) enum Forked { Child, Parent(() -> Kept ! {rt, div}) }
+enum Out(T: Type) { Built(T), RanNode(Node), RanUnit }
+
+pub effect fork(): Forked resume ω
+pub effect done_node(n: Node): Never resume 0
+pub effect done_unit(): Never resume 0
+
+// What keeping performs; `rooted` handles it.
+pub effect keeping { fork, done_node, done_unit }
+
+// `f`, to be run later with what stands where it was kept.
+pub fn keep<X: Shared + NoBorrow, !r>(
+  f: (x: X) -> Node ! {rt, div} ∪ r
+): ((x: X) -> Node ! {rt, div}) ! {keeping, rt, div} ∪ r {
+  let arg: Ref(Option(X)) := perform ref_new(None)
+  match perform fork() {
+    Child => match perform ref_get(arg) {
+      Some(x) => perform done_node(f(x))
+      None => perform done_node(Node { id: 0 })
+    }
+    Parent(run) => (x: X) => {
+      perform ref_set(arg, Some(x))
+      match run() { KNode(n) => n, KUnit => Node { id: 0 }, KNone => Node { id: 0 } }
+    }
+  }
+}
+
+// A handler `f`, to be run later with what stands where it was kept.
+pub fn keep_handler<X: Shared + NoBorrow, !r>(
+  f: (x: X) -> Unit ! {rt, div} ∪ r
+): ((x: X) -> Unit ! {rt, div}) ! {keeping, rt, div} ∪ r {
+  let arg: Ref(Option(X)) := perform ref_new(None)
+  match perform fork() {
+    Child => {
+      match perform ref_get(arg) { Some(x) => f(x), None => #() }
+      perform done_unit()
+    }
+    Parent(run) => (x: X) => {
+      perform ref_set(arg, Some(x))
+      match run() { KNode(_) => #(), KUnit => #(), KNone => #() }
+    }
+  }
+}
+
+// `f`, to be run later with what stands where it was kept.
+pub fn keep_run<!r>(
+  f: () -> Unit ! {rt, div} ∪ r
+): (() -> Unit ! {rt, div}) ! {keeping, rt, div} ∪ r {
+  match perform fork() {
+    Child => {
+      f()
+      perform done_unit()
+    }
+    Parent(run) => () => match run() { KNode(_) => #(), KUnit => #(), KNone => #() }
+  }
+}
+
+// A value `f` gives, built later with what stands where it was kept.
+pub fn keep_value<A: Shared + NoBorrow, !r>(
+  f: () -> A ! {rt, div} ∪ r
+): (() -> A ! {rt, div}) ! {keeping, rt, div} ∪ r {
+  let out: Ref(Option(A)) := perform ref_new(None)
+  let h := keep_handler((u: Unit) => perform ref_set(out, Some(f())))
+  () => {
+    h(#())
+    match perform ref_get(out) {
+      Some(v) => v
+      // `h` always sets it; this is not reached.
+      None => f_unreached(out)
+    }
+  }
+}
+fn f_unreached<A: Shared + NoBorrow>(out: Ref(Option(A))): A ! {div, ref_get} {
+  match perform ref_get(out) { Some(v) => v, None => f_unreached(out) }
+}
+
+// The root of a view: what `body` keeps runs later, after this returns. Every handler that
+// should stand around a kept part (contexts, the tree) is inside `body`; nothing outside.
+pub fn rooted<T>(body: () -> T ! {keeping, rt, div}): Option(T) ! {rt, div} {
+  let out := handle { Built(body()) } with {
+    fork(), k => k(Parent(() => match k(Child) {
+      RanNode(n) => KNode(n)
+      RanUnit => KUnit
+      Built(x) => KNone
+    }))
+    done_node(n) => RanNode(n)
+    done_unit() => RanUnit
+    return x => x
+  }
+  match out { Built(x) => Some(x), RanNode(_) => None, RanUnit => None }
+}
+
+// The tree a view builds on. `with_tree` answers it; a part kept with `keep` gets the same tree
+// when it runs later.
+pub effect ui<K: Shared + NoBorrow, P: Shared + NoBorrow>(): Tree(K, P) direct
+
+// `body` on the tree `t`.
+pub fn with_tree<K: Shared + NoBorrow, P: Shared + NoBorrow, A, !f>(
+  t: Tree(K, P),
+  body: () -> A ! {ui(K, P)} ∪ f
+): A ! f {
+  handle { body() } with {
+    ui<K, P>(), k => k(t)
+    return value => value
+  }
+}

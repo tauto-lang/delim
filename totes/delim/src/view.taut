@@ -1,0 +1,706 @@
+import std::builtin::macro {
+  Syn,
+  SynArm,
+  SynBinder,
+  SynExpr,
+  SynHighlight,
+  SynPattern,
+  SynSpan,
+  SynTok,
+  SynToken,
+  macro_error
+}
+import "tree.taut" {
+  EventData,
+  EventKind,
+  Prop,
+  el,
+  event_text,
+  fragment,
+  keyed_each_signal,
+  show,
+  switch_on,
+  switch_on_change,
+  text
+}
+
+// `view!` writes elements of the web renderers as markup:
+//
+//   view!(`$t <div class="row"><p>"Count: " $text_dyn(t, () => decimal(get(n)))</p>
+//     <button aria-label="Add" on:press=${(d: EventData) => update(n, (x: u64) => x + 1)}>"+"</button>
+//   </div>`)
+//
+// The expression first is the tree. An attribute is a quoted text, fixed, or `${e}` with `e`
+// a text, followed; `on:press` and the other event names take a handler of the event's data.
+// A child is an element, a quoted text, or `${e}` with `e` a node.
+
+syntax!(view, ```par
+%start View
+%title "view"
+%%
+View: [ TreeInput ] Child;
+TreeInput: TautoExpr;
+Element: Lt Name { Attr } Rest;
+Rest: SlashGt | Body;
+Body: Gt { Child } LtSlash Name Gt;
+Fragment: FragOpen { Child } FragClose;
+Block: LBrace { Child } RBrace;
+Conditional: KwIf TautoExpr Block [ Otherwise ];
+Otherwise: KwElse ElseBody;
+ElseBody: Block | Conditional;
+Each: KwFor Name InWord TautoExpr KeyWord TautoExpr Block;
+InWord: Name;
+KeyWord: Name;
+Selection: KwMatch TautoExpr LBrace { Arm } RBrace;
+Arm: Pattern Arrow Block;
+Pattern: Name [ PatternArgs ] | TautoExpr;
+PatternArgs: LParen [ PatternList ] RParen;
+PatternList: Pattern { PatternTail };
+PatternTail: Comma Pattern;
+Attr: Name Equals Value;
+Value: Str | TautoExpr;
+Mount: KwMount Name LParen [ MountArgs ] RParen;
+MountArgs: MountArg { MountArgTail };
+MountArgTail: Comma MountArg;
+MountArg: Name TautoExpr;
+Child: Element | Fragment | Conditional | Each | Selection | Mount | Str | TautoExpr;
+FragOpen: '<>';
+FragClose: '</>';
+KwIf: '@if';
+KwElse: '@else';
+KwFor: '@for';
+KwMatch: '@match';
+KwMount: '@mount';
+LBrace: '{';
+RBrace: '}';
+LParen: '(';
+RParen: ')';
+Comma: ',';
+Arrow: '=>';
+LtSlash: '</';
+SlashGt: '/>';
+Lt: '<';
+Gt: '>';
+Equals: '=';
+Name: /[A-Za-z_][A-Za-z0-9_:-]*/;
+Str: /"[^"]*"/;
+```, with(fmt: view_fmt, tokens: view_tokens)) => struct View, struct Element, enum Rest, struct Body, struct Attr, enum Value,
+  enum Child, struct Fragment, struct Block, struct Conditional, struct Otherwise, enum ElseBody,
+  struct Each, struct InWord, struct KeyWord, struct Selection, struct Arm, enum Pattern, struct PatternArgs, struct PatternList,
+  struct PatternTail, struct Mount, struct MountArgs, struct MountArgTail, struct MountArg, fn parse
+
+// ---- the tools: `tauto fmt` and the language server's colours --------------------------------
+// Both read the scanner's tokens. A tag's name is a type, an attribute's a property, a quoted
+// text a string and the marks operators; a `${…}` is left to the colours of tauto.
+
+fn view_mark(t: SynTok, kind: Text, rest: List(SynHighlight)): List(SynHighlight) {
+  Cons(SynHighlight { start: t.start, end: t.end, kind: kind }, rest)
+}
+
+// `tag` says the token before was `<` or `</`.
+fn view_colour(ts: List(SynTok), tag: Bool): List(SynHighlight) ! {div} {
+  match ts {
+    Nil => Nil
+    Cons(t, rest) => if t.skipped { view_colour(rest, tag) } else if t.kind == "Name" {
+      view_mark(t, if tag { "type" } else { "property" }, view_colour(rest, false))
+    } else if t.kind == "Str" {
+      view_mark(t, "string", view_colour(rest, false))
+    } else if t.kind == "TautoExpr" {
+      view_colour(rest, false)
+    } else if t.kind == "KwIf" || t.kind == "KwElse" || t.kind == "KwFor" || t.kind == "KwMatch" || t.kind == "KwMount" {
+      view_mark(t, "keyword", view_colour(rest, false))
+    } else { view_mark(t, "operator", view_colour(rest, t.kind == "Lt" || t.kind == "LtSlash")) }
+  }
+}
+
+pub fn view_tokens(ts: List(SynTok)): List(SynHighlight) ! {div} { view_colour(ts, false) }
+
+// An element as the formatter lays it out: its name, its attributes as written (`name=value`),
+// and its children, or `None` for `/>`.
+struct ViewRead { node: ViewLayout, rest: List(SynTok) }
+
+enum ViewLayout {
+  LayEl(Text, List(Text), Option(List(ViewLayout)))
+  LayLeaf(Text)
+  LayBlock(Text, List(ViewLayout))
+  LayChain(ViewLayout, ViewLayout)
+}
+
+fn view_solid(ts: List(SynTok)): List(SynTok) ! {div} {
+  match ts {
+    Nil => Nil
+    Cons(t, rest) => if t.skipped { view_solid(rest) } else { Cons(t, view_solid(rest)) }
+  }
+}
+
+fn view_rev(l: List(Text), acc: List(Text)): List(Text) ! {div} {
+  match l {
+    Nil => acc
+    Cons(x, rest) => view_rev(rest, Cons(x, acc))
+  }
+}
+
+fn view_rev_nodes(l: List(ViewLayout), acc: List(ViewLayout)): List(ViewLayout) ! {div} {
+  match l {
+    Nil => acc
+    Cons(x, rest) => view_rev_nodes(rest, Cons(x, acc))
+  }
+}
+
+// `<name attrs (/> | > children </name>)` from the tokens, with what follows.
+fn view_read_element(ts: List(SynTok)): Option(ViewRead) ! {div, overflow} {
+  match ts {
+    Cons(lt, Cons(name, rest)) => if lt.kind == "Lt" && name.kind == "Name" {
+      view_read_attrs(name.text, Nil, rest)
+    } else { None }
+    Nil => None
+    Cons(_, Nil) => None
+  }
+}
+
+// Read a complete child, including directive blocks. Embedded Tauto expressions are opaque.
+fn view_read_el(ts: List(SynTok)): Option(ViewRead) ! {div, overflow} {
+  match ts {
+    Nil => None
+    Cons(t, rest) => if t.kind == "Lt" { view_read_element(ts) } else if t.kind == "FragOpen" {
+      view_read_parts("fragment", "", Nil, rest)
+    } else if t.kind == "KwIf" || t.kind == "KwFor" || t.kind == "KwMatch" || t.kind == "KwMount" {
+      view_read_header(t.text, rest)
+    } else if t.kind == "Str" || t.kind == "TautoExpr" {
+      Some(ViewRead { node: LayLeaf(t.text), rest: rest })
+    } else { None }
+  }
+}
+
+fn view_header_piece(head: Text, token: SynTok): Text ! {div, overflow} {
+  if head == "" {
+    token.text
+  } else if token.kind == "LParen" || token.kind == "RParen" || token.kind == "Comma" {
+    concat(head, token.text)
+  } else if Text::slice(head, Text::len(head) - 1, Text::len(head)) == Some("(") {
+    concat(head, token.text)
+  } else { concat(head, concat(" ", token.text)) }
+}
+
+fn view_block_open(head: Text): Text {
+  if head == "" { "{" } else { concat(head, " {") }
+}
+
+fn view_read_header(head: Text, ts: List(SynTok)): Option(ViewRead) ! {div, overflow} {
+  match ts {
+    Nil => None
+    Cons(t, rest) => if t.kind == "LBrace" { view_read_parts("block", head, Nil, rest) } else {
+      view_read_header(view_header_piece(head, t), rest)
+    }
+  }
+}
+
+fn view_read_parts(
+  kind: Text,
+  head: Text,
+  children: List(ViewLayout),
+  ts: List(SynTok)
+): Option(ViewRead) ! {div, overflow} {
+  match ts {
+    Nil => None
+    Cons(t, rest) => if (kind == "fragment" && t.kind == "FragClose") || (kind == "block" && t.kind == "RBrace") {
+      let node := if kind == "fragment" {
+        LayEl("", Nil, Some(view_rev_nodes(children, Nil)))
+      } else { LayBlock(head, view_rev_nodes(children, Nil)) }
+      match rest {
+        Cons(other, more) => if kind == "block" && other.kind == "KwElse" {
+          let branch := match more {
+            Cons(next, _) => if next.kind == "KwIf" { view_read_el(more) } else {
+              view_read_header("", more)
+            }
+            Nil => None
+          }
+          match branch {
+            Some(b) => Some(ViewRead { node: LayChain(node, b.node), rest: b.rest })
+            None => None
+          }
+        } else { Some(ViewRead { node: node, rest: rest }) }
+        Nil => Some(ViewRead { node: node, rest: rest })
+      }
+    } else {
+      let child := view_read_el(ts)
+      // A match arm has a pattern header followed by a block.
+      let next := match child { Some(c) => Some(c)
+        None => if kind == "block" { view_read_header("", ts) } else { None } }
+      match next {
+        Some(c) => view_read_parts(kind, head, Cons(c.node, children), c.rest)
+        None => None
+      }
+    }
+  }
+}
+
+fn view_read_attrs(
+  name: Text,
+  attrs: List(Text),
+  ts: List(SynTok)
+): Option(ViewRead) ! {div, overflow} {
+  match ts {
+    Nil => None
+    Cons(t, rest) => if t.kind == "SlashGt" {
+      Some(ViewRead { node: LayEl(name, view_rev(attrs, Nil), None), rest: rest })
+    } else if t.kind == "Gt" {
+      view_read_children(name, view_rev(attrs, Nil), Nil, rest)
+    } else if t.kind == "Name" {
+      match rest {
+        Cons(eq, Cons(v, more)) => if eq.kind == "Equals" {
+          view_read_attrs(name, Cons(concat(t.text, concat("=", v.text)), attrs), more)
+        } else { None }
+        Nil => None
+        Cons(_, Nil) => None
+      }
+    } else { None }
+  }
+}
+
+// A `</name>` that closes another element is the macro's error; the formatter leaves it be.
+fn view_read_children(
+  name: Text,
+  attrs: List(Text),
+  children: List(ViewLayout),
+  ts: List(SynTok)
+): Option(ViewRead) ! {div, overflow} {
+  match ts {
+    Nil => None
+    Cons(t, rest) => if t.kind == "LtSlash" {
+      match rest {
+        Cons(close, Cons(gt, more)) => if close.kind == "Name" && gt.kind == "Gt" && close.text == name {
+          Some(
+            ViewRead { node: LayEl(name, attrs, Some(view_rev_nodes(children, Nil))), rest: more }
+          )
+        } else { None }
+        Nil => None
+        Cons(_, Nil) => None
+      }
+    } else {
+      match view_read_el(ts) {
+        Some(r) => view_read_children(name, attrs, Cons(r.node, children), r.rest)
+        None => None
+      }
+    }
+  }
+}
+
+fn view_join(l: List(Text), sep: Text): Text ! {div} {
+  match l {
+    Nil => ""
+    Cons(x, Nil) => x
+    Cons(x, rest) => concat(x, concat(sep, view_join(rest, sep)))
+  }
+}
+
+fn view_open_flat(name: Text, attrs: List(Text)): Text ! {div} {
+  match attrs {
+    Nil => concat("<", name)
+    Cons(_, _) => concat("<", concat(name, concat(" ", view_join(attrs, " "))))
+  }
+}
+
+fn view_flat(n: ViewLayout): Text ! {div} {
+  match n {
+    LayLeaf(t) => t
+    LayBlock(head, children) => match children {
+      Nil => concat(view_block_open(head), "}")
+      Cons(_, _) => concat(
+        view_block_open(head),
+        concat(" ", concat(view_join(view_flats(children), " "), " }"))
+      )
+    }
+    LayChain(first, second) => concat(view_flat(first), concat(" @else ", view_flat(second)))
+    LayEl(name, attrs, None) => concat(view_open_flat(name, attrs), "/>")
+    LayEl(name, attrs, Some(children)) => concat(
+      view_open_flat(name, attrs),
+      concat(">", concat(view_join(view_flats(children), " "), concat("</", concat(name, ">"))))
+    )
+  }
+}
+
+fn view_flats(l: List(ViewLayout)): List(Text) ! {div} {
+  match l {
+    Nil => Nil
+    Cons(n, rest) => Cons(view_flat(n), view_flats(rest))
+  }
+}
+
+fn view_has_newline(t: Text, i: u64): Bool ! {div, overflow} {
+  match Text::byte(t, i) {
+    None => false
+    Some(b) => U64::of_u8(b) == 10 || view_has_newline(t, i + 1)
+  }
+}
+
+fn view_fits(t: Text, col: u64, width: u64): Bool ! {div, overflow} {
+  not(view_has_newline(t, 0)) && col + Text::len(t) <= width
+}
+
+fn view_spaces(n: u64): Text ! {div, overflow} {
+  if n == 0 { "" } else { concat(" ", view_spaces(n - 1)) }
+}
+
+// An element whose first line starts at `col` and whose other lines at `indent`: on one line if
+// it fits, else its attributes and its children each on a line of their own, two spaces in.
+fn view_lay(n: ViewLayout, indent: u64, col: u64, width: u64): Text ! {div, overflow} {
+  let flat := view_flat(n)
+  if view_fits(flat, col, width) { flat } else {
+    match n {
+      LayLeaf(t) => t
+      LayBlock(head, children) => concat(
+        view_block_open(head),
+        concat(
+          view_lay_children(children, indent + 2, width),
+          concat(concat("\n", view_spaces(indent)), "}")
+        )
+      )
+      LayChain(first, second) => concat(
+        view_lay(first, indent, col, width),
+        concat(" @else ", view_lay(second, indent, indent + 7, width))
+      )
+      LayEl(name, attrs, rest) => {
+        let inner := concat("\n", view_spaces(indent + 2))
+        let one := view_open_flat(name, attrs)
+        let open := if attrs == Nil || view_fits(concat(one, "/>"), col, width) { one } else {
+          concat(concat("<", name), concat(inner, view_join(attrs, inner)))
+        }
+        match rest {
+          None => concat(open, "/>")
+          Some(Nil) => concat(open, concat("></", concat(name, ">")))
+          Some(children) => concat(
+            open,
+            concat(
+              ">",
+              concat(
+                view_lay_children(children, indent + 2, width),
+                concat(concat("\n", view_spaces(indent)), concat("</", concat(name, ">")))
+              )
+            )
+          )
+        }
+      }
+    }
+  }
+}
+
+fn view_lay_children(l: List(ViewLayout), indent: u64, width: u64): Text ! {div, overflow} {
+  match l {
+    Nil => ""
+    Cons(n, rest) => concat(
+      concat("\n", view_spaces(indent)),
+      concat(view_lay(n, indent, indent, width), view_lay_children(rest, indent, width))
+    )
+  }
+}
+
+fn view_format(ts: List(SynTok), width: u64): Option(Text) ! {div, overflow} {
+  match view_solid(ts) {
+    Nil => None
+    Cons(first, rest) => if first.kind == "TautoExpr" {
+      match view_read_el(rest) {
+        Some(r) => if r.rest == Nil {
+          Some(
+            concat(first.text, concat(" ", view_lay(r.node, 0, Text::len(first.text) + 1, width)))
+          )
+        } else { None }
+        None => None
+      }
+    } else { None }
+  }
+}
+
+// The tree first and the element after it on the same line.
+// Leave the source as written if the layout exceeds the column counter's range.
+pub fn view_fmt(ts: List(SynTok), width: u64): Option(Text) ! {div} {
+  handle { view_format(ts, width) } with { overflow() => None }
+}
+
+// ---- what the renderers write, checked before the program runs --------------------------------
+// A macro function cannot run `policy.taut`, whose byte values are `Nat`s, so its lists are
+// written here again as texts; a test checks that both say the same.
+
+// What a renderer says of its elements, for the `view!` the renderer defines: the kind a tag
+// names, the properties its attributes give (the tree is the one the view is built on), and
+// what `${…}` and `@mount` make. The syntax, `@if`, `@for`, `@match` and fragments are the
+// same for every renderer (`View::child`).
+pub(open) struct ViewDialect {
+  kind: (name: SynToken) -> SynExpr ! {macro_error, div, overflow},
+  attrs: (t: SynExpr, l: List(view::Attr)) -> List(SynExpr) ! {macro_error, div, overflow},
+  value: (t: SynExpr, e: SynExpr) -> SynExpr ! {macro_error, div, overflow},
+  mount: (t: SynExpr, m: view::Mount) -> SynExpr ! {macro_error, div, overflow},
+  // `f`, the function of an `@if`, `@for` or `@match` that the renderer runs again when the signals
+  // it reads change, as a function that runs it with what the view handles (its contexts).
+  lift: (t: SynExpr, f: SynExpr) -> SynExpr ! {macro_error, div, overflow},
+  // `f`, a function that builds a part of an `@if`, `@for` or `@match` later, from the value it
+  // is given, as a function that builds it with what the view handles.
+  keep: (t: SynExpr, f: SynExpr) -> SynExpr ! {macro_error, div, overflow}
+}
+
+pub module View {
+
+  // The text of a quoted token, without its quotes.
+  pub fn unquote(tok: SynToken): Text ! {div, overflow} {
+    match Text::slice(tok.text, 1, Text::len(tok.text) - 1) {
+      Some(t) => t
+      None => ""
+    }
+  }
+
+  pub fn list(xs: List(SynExpr)): SynExpr ! {div} {
+    match xs {
+      Nil => quote { Nil }
+      Cons(x, rest) => {
+        let tail := View::list(rest)
+        quote { Cons($x, $tail) }
+      }
+    }
+  }
+
+  // The event `on:<name>` names.
+  pub fn event(at: SynSpan, name: Text): SynExpr ! {macro_error, div} {
+    if Text::slice(name, 0, 7) == Some("action:") {
+      let action := match Text::slice(name, 7, Text::len(name)) { Some(value) => value
+        None => "" }
+      if action == "" { Syn::error(at, "on:action takes a name") } else {
+        let value := Syn::lift_text(action, at)
+        quote { NamedAction($value) }
+      }
+    } else if name == "press" { quote { Press } } else if name == "focus" {
+      quote { Focus }
+    } else if name == "blur" {
+      quote { Blur }
+    } else if name == "key" { quote { Key } } else if name == "edit" {
+      quote { Edit }
+    } else if name == "scroll" {
+      quote { Scroll }
+    } else if name == "submit" {
+      quote { Submit }
+    } else if name == "pointerdown" { quote { PointerDown } } else if name == "pointerup" {
+      quote { PointerUp }
+    } else if name == "pointermove" { quote { PointerMove } } else if name == "pointerenter" {
+      quote { PointerEnter }
+    } else if name == "pointerleave" { quote { PointerLeave } } else if name == "dragstart" {
+      quote { DragStart }
+    } else if name == "dragmove" { quote { DragMove } } else if name == "dragend" {
+      quote { DragEnd }
+    } else if name == "drop" { quote { Drop } } else if name == "keyup" {
+      quote { KeyUp }
+    } else if name == "dblclick" {
+      quote { DoubleClick }
+    } else if name == "contextmenu" { quote { ContextMenu } } else if name == "wheel" {
+      quote { Wheel }
+    } else if name == "paste" { quote { Paste } } else {
+      Syn::error(at, concat("no such event: on:", name))
+    }
+  }
+
+  // A handler is `(d: EventData) => …`, or, when it needs nothing from the event, `() => …`,
+  // or, for a handler of committed text (`on:edit`), `(value: Text) => …`, or of a checkbox's
+  // state, `(checked: Bool) => …`: as a function of the event's data.
+  pub fn handler_fn(h: SynExpr): SynExpr ! {macro_error, div} {
+    match h {
+      ExLam(Nil, _, _) => quote { (delim_event: EventData) => ($h)() }
+      ExLam(Cons(BName(_, Some(ExVar(ty)), _), Nil), _, _) => if ty.name == "Text" {
+        quote { (delim_event: EventData) => ($h)(event_text(delim_event)) }
+      } else if ty.name == "Bool" {
+        quote { (delim_event: EventData) => ($h)(event_text(delim_event) == "true") }
+      } else { h }
+      _ => h
+    }
+  }
+
+  // The handler `h` of the event `kind`, as the tree keeps it.
+  pub fn handler(kind: SynExpr, h: SynExpr): SynExpr ! {macro_error, div} {
+    let f := View::handler_fn(h)
+    quote { On($kind, $f) }
+  }
+
+  fn children(
+    d: ViewDialect,
+    t: SynExpr,
+    l: List(view::Child)
+  ): List(SynExpr) ! {macro_error, div, overflow} {
+    match l {
+      Nil => Nil
+      Cons(c, rest) => Cons(View::child(d, t, c), View::children(d, t, rest))
+    }
+  }
+
+  fn group(
+    d: ViewDialect,
+    t: SynExpr,
+    children: List(view::Child)
+  ): SynExpr ! {macro_error, div, overflow} {
+    let nodes := View::list(View::children(d, t, children))
+    quote { fragment($t, $nodes) }
+  }
+
+  fn block(d: ViewDialect, t: SynExpr, b: view::Block): SynExpr ! {macro_error, div, overflow} {
+    match b.child {
+      Cons(child, Nil) => View::child(d, t, child)
+      Nil => View::group(d, t, Nil)
+      Cons(first, Cons(second, more)) => View::group(d, t, Cons(first, Cons(second, more)))
+    }
+  }
+
+  fn conditional(
+    d: ViewDialect,
+    t: SynExpr,
+    c: view::Conditional
+  ): SynExpr ! {macro_error, div, overflow} {
+    let e := c.tauto_expr
+    let cond := (d.lift)(t, quote { () => $e })
+    let yes := View::block(d, t, c.block)
+    match c.otherwise {
+      None => {
+        let build := (d.lift)(t, quote { () => $yes })
+        quote { show($t, $cond, $build) }
+      }
+      Some(other) => {
+        let no := match other.else_body {
+          Block(b) => View::block(d, t, b)
+          Conditional(nested) => View::conditional(d, t, nested)
+        }
+        let build := (d.keep)(t, quote { (value: Bool) => if value { $yes } else { $no } })
+        quote { switch_on($t, $cond, $build) }
+      }
+    }
+  }
+
+  fn constructor_name(name: Text, index: u64): Bool ! {div, overflow} {
+    match Text::byte(name, index) {
+      None => false
+      Some(b) => (
+        index == 0 && U64::of_u8(b) >= 65 && U64::of_u8(b) <= 90
+      ) || U64::of_u8(b) == 58 || View::constructor_name(name, index + 1)
+    }
+  }
+
+  fn pattern(p: view::Pattern): SynPattern ! {macro_error, div, overflow} {
+    match p {
+      TautoExpr(e) => View::expr_pattern(e)
+      NameOpt { name: tok, pattern_args: args, span: _ } => {
+        let name := Syn::ident(tok)
+        match args {
+          Some(a) => PtCtor(name, match a.pattern_list {
+            None => Nil
+            Some(ps) => Cons(View::pattern(ps.pattern), View::pattern_tail(ps.pattern_tail))
+          })
+          None => if tok.text == "_" { PtWild } else if tok.text == "true" {
+            PtBool(true)
+          } else if tok.text == "false" { PtBool(false) } else if View::constructor_name(
+            tok.text,
+            0
+          ) { PtCtor(name, Nil) } else { PtBind(name, None) }
+        }
+      }
+    }
+  }
+
+  fn pattern_tail(ps: List(view::PatternTail)): List(SynPattern) ! {macro_error, div, overflow} {
+    match ps {
+      Nil => Nil
+      Cons(p, rest) => Cons(View::pattern(p.pattern), View::pattern_tail(rest))
+    }
+  }
+
+  fn expr_pattern(e: SynExpr): SynPattern ! {macro_error, div, overflow} {
+    match e {
+      ExVar(n) => if n.name == "_" { PtWild } else { PtCtor(n, Nil) }
+      ExBool(b, _) => PtBool(b)
+      ExText(s, _) => PtText(s)
+      ExApp(ExVar(n), args, _) => PtCtor(n, View::expr_patterns(args))
+      _ => Syn::error(Syn::call_span(), "view! pattern: use a name, constructor, Bool or Text")
+    }
+  }
+
+  fn expr_patterns(es: List(SynExpr)): List(SynPattern) ! {macro_error, div, overflow} {
+    match es {
+      Nil => Nil
+      Cons(ExVar(n), rest) => Cons(
+        if n.name == "_" { PtWild } else { PtBind(n, None) },
+        View::expr_patterns(rest)
+      )
+      Cons(e, rest) => Cons(View::expr_pattern(e), View::expr_patterns(rest))
+    }
+  }
+
+  fn arms(
+    d: ViewDialect,
+    t: SynExpr,
+    xs: List(view::Arm)
+  ): List(SynArm) ! {macro_error, div, overflow} {
+    match xs {
+      Nil => Nil
+      Cons(a, rest) => Cons(SynArm {
+        pattern: View::pattern(a.pattern), guard: None, goal: None, body: View::block(d, t, a.block)
+      }, View::arms(d, t, rest))
+    }
+  }
+
+  pub fn child(d: ViewDialect, t: SynExpr, c: view::Child): SynExpr ! {macro_error, div, overflow} {
+    match c {
+      Element(e) => View::element(d, t, e)
+      Fragment(f) => View::group(d, t, f.child)
+      Conditional(c) => View::conditional(d, t, c)
+      Each(e) => {
+        if e.in_word.name.text == "in" { #() } else {
+          Syn::error(e.in_word.span, "@for expects `in`")
+        }
+        if e.key_word.name.text == "key" { #() } else {
+          Syn::error(e.key_word.span, "@for requires `key` and a key function")
+        }
+        let x := e.tauto_expr
+        let items := (d.lift)(t, quote { () => $x })
+        let key := e.tauto_expr_2
+        let body := View::block(d, t, e.block)
+        let row := (d.keep)(t, ExLam([BName(Syn::ident(e.name), None, None)], body, e.name.span))
+        quote { keyed_each_signal($t, $items, $key, $row) }
+      }
+      Selection(s) => {
+        let x := s.tauto_expr
+        let source := (d.lift)(t, quote { () => $x })
+        let value := match quote { (delim_match_value) => delim_match_value } {
+          ExLam(Cons(BName(n, _, _), _), _, _) => n
+          _ => Syn::error(s.span, "view! could not construct match binder")
+        }
+        let body := ExMatch(
+          ExVar(value),
+          None,
+          View::arms(d, t, s.arm),
+          None,
+          None,
+          Syn::call_span()
+        )
+        let build := (d.keep)(t, ExLam([BName(value, None, None)], body, Syn::call_span()))
+        quote { switch_on_change($t, $source, $build) }
+      }
+      Str(tok) => {
+        let s := Syn::lift_text(View::unquote(tok), tok.span)
+        quote { text($t, $s) }
+      }
+      Mount(m) => (d.mount)(t, m)
+      TautoExpr(e) => (d.value)(t, e)
+    }
+  }
+
+  fn element(d: ViewDialect, t: SynExpr, e: view::Element): SynExpr ! {macro_error, div, overflow} {
+    let kind := (d.kind)(e.name)
+    let props := View::list((d.attrs)(t, e.attr))
+    let children := match e.rest {
+      SlashGt(tok) => quote { Nil }
+      Body(b) => {
+        if b.name.text == e.name.text { #() } else {
+          Syn::error(
+            b.name.span,
+            concat(concat("`</", b.name.text), concat(">` closes `<", concat(e.name.text, ">`")))
+          )
+        }
+        View::list(View::children(d, t, b.child))
+      }
+    }
+    quote { el($t, $kind, $props, $children) }
+  }
+}

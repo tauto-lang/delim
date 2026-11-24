@@ -1,0 +1,47 @@
+import "../../../../delim-html/src/markup.taut" {
+  bytes_of,
+  checked_html,
+  text_of_byte_list,
+  trusted_text
+}
+import "../../../../delim-html/src/write.taut" { HTree, written_all }
+
+fn repeat(n: Nat, value: Text, acc: Text): Text ! {div} {
+  if n == 0 { acc } else { repeat(n - 1, value, concat(acc, value)) }
+}
+let source := repeat(512, "日本語<&>\"", "")
+let escaped := repeat(512, "日本語&lt;&amp;&gt;&quot;", "")
+let tree := HEl(
+  bytes_of("div"),
+  [#(@name bytes_of("title"), @value bytes_of("<&\""))],
+  [
+    HEl(bytes_of("span"), Nil, [HText(bytes_of(source))]),
+    HEl(bytes_of("br"), Nil, [HText(bytes_of("discarded"))])
+  ]
+)
+let html := trusted_text(written_all([tree]))
+let expected := concat(
+  "<div title=\"&lt;&amp;&quot;\"><span>",
+  concat(escaped, "</span><br></div>")
+)
+perform test(
+  "long Unicode HTML preserves escaping, attributes and void elements",
+  () => expect(html == expected, "HTML serialization changed")
+)
+perform test(
+  "long UTF-8 conversion round trips",
+  () => expect(text_of_byte_list(bytes_of(source)) == source, "byte conversion changed")
+)
+perform test(
+  "invalid UTF-8 remains rejected",
+  () => expect(text_of_byte_list([255]) == "", "invalid UTF-8 accepted")
+)
+let unsafe := match checked_html("<script>alert(1)</script>") { None => true, Some(_) => false }
+let unsafe_url := match checked_html("<a href=\"javascript:alert(1)\">x</a>") {
+  None => true,
+  Some(_) => false
+}
+perform test(
+  "HTML policy still rejects scripts and executable URLs",
+  () => expect(unsafe && unsafe_url, "unsafe HTML accepted")
+)

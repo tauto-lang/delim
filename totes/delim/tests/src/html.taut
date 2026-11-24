@@ -1,0 +1,299 @@
+import std::builtin::par { ref_get, ref_new, ref_set, wait }
+import "../../src/common.taut" { Vocab }
+import "../../../delim-html/src/markup.taut" {
+  HtmlAttr,
+  HtmlKind,
+  checked_html,
+  escaped_html,
+  trusted_text
+}
+import "../../src/resource.taut" { request, resource, suspense_in }
+import "../../../delim-html/src/safe.taut" { TrustedHtml, no_html }
+import "../../src/signal.taut" { Load, cells, get, rt, set, signal }
+import "../../src/tree.taut" { Node, Prop, Tree, el, text, text_dyn }
+import "../../src/widgets.taut" { button, column, text_input }
+import "../../../delim-html/src/html.taut" {
+  LoadAnswer,
+  Stream,
+  island,
+  render_html_in,
+  render_html_loading,
+  render_html_loading_together,
+  render_html_streaming,
+  render_html_streaming_together,
+  trusted
+}
+
+fn checked_or_empty(html: Text): TrustedHtml ! {div, overflow} {
+  match checked_html(html) {
+    Some(h) => h
+    None => no_html()
+  }
+}
+
+fn page(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let n := signal(3)
+  column(
+    t,
+    v,
+    Cons(Static(Attr("title", "a \"b\"")), Nil),
+    Cons(
+      text_dyn(t, () => if get(n) == 3 { "<three> & more" } else { "other" }),
+      Cons(
+        button(t, v, "Add", () => set(n, 4)),
+        Cons(text_input(t, v, "Name", signal("x"), (s: Text) => #()), Nil)
+      )
+    )
+  )
+}
+
+fn shown_load(l: Load): Text {
+  match l {
+    Loading => "loading"
+    Loaded(v) => v
+    LoadFailed(why) => why
+  }
+}
+
+fn greeting(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  suspense_in(t, () => text(t, "…"), () => {
+    let r := resource(t, "name")
+    el(t, Tag("p"), Nil, Cons(text_dyn(t, () => shown_load(get(r))), Nil))
+  })
+}
+
+fn shown(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  el(
+    t,
+    Tag("div"),
+    Nil,
+    Cons(trusted(t, checked_or_empty("<b>x</b>")), Cons(trusted(t, escaped_html("<b>\"&")), Nil))
+  )
+}
+
+fn loading_button(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let ready := resource(t, "enabled")
+  el(t, Tag("button"), [Dyn(() => Disabled(match get(ready) {
+    Loading => true
+    Loaded(value) => false
+    LoadFailed(message) => true
+  }))], [text(t, "Run")])
+}
+
+fn scripted(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  el(
+    t,
+    Tag("div"),
+    Cons(Static(Attr("srcdoc", "<script>x()</script>")), Cons(Static(Attr("style", "x")), Nil)),
+    Cons(
+      el(t, Tag("script"), Nil, Cons(text(t, "alert(1)"), Nil)),
+      Cons(el(t, Tag("img src=x onerror=alert(1)"), Nil, Nil), Nil)
+    )
+  )
+}
+
+fn accepted(html: Text): Bool ! {div, overflow} { checked_html(html) != None }
+
+fn island_view(
+  t: Tree(HtmlKind, HtmlAttr),
+  v: Vocab(HtmlKind, HtmlAttr),
+  props: Text
+): Node ! {rt, div} {
+  column(t, v, Cons(Static(Attr("title", props)), Nil), Cons(text(t, "<x>"), Nil))
+}
+
+fn with_island(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  island(t, "i", "a\"b", island_view)
+}
+
+fn two_boundaries(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  el(
+    t,
+    Tag("div"),
+    Nil,
+    Cons(
+      suspense_in(t, () => text(t, "a…"), () => {
+        let r := resource(t, "a")
+        el(t, Tag("p"), Nil, Cons(text_dyn(t, () => shown_load(get(r))), Nil))
+      }),
+      Cons(
+        suspense_in(t, () => text(t, "b…"), () => {
+          let r := resource(t, "b")
+          el(t, Tag("p"), Nil, Cons(text_dyn(t, () => shown_load(get(r))), Nil))
+        }),
+        Nil
+      )
+    )
+  )
+}
+
+fn streamed(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div}
+): Text ! {div, wait, overflow, cells} {
+  let out := perform ref_new("")
+  render_html_streaming(draw, (s: Stream) => match s {
+    Fetch(key) => Ok(concat(key, "!"))
+    Part(part) => {
+      perform ref_set(out, concat(concat(perform ref_get(out), part), "|"))
+      Ok("")
+    }
+  })
+  perform ref_get(out)
+}
+
+// `render_html_streaming_together` with the answers given in the order of `order`, the places
+// of the keys asked for; a key whose place is not in `order` gets no answer.
+fn streamed_in(
+  draw: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div},
+  order: List(u64)
+): Text ! {div, wait, overflow, cells} {
+  let out := perform ref_new("")
+  let asked := perform ref_new(Nil)
+  let left := perform ref_new(Nil)
+  render_html_streaming_together(
+    draw,
+    (keys: List(Text)) => {
+      perform ref_set(asked, keys)
+      perform ref_set(left, order)
+    },
+    () => match perform ref_get(left) {
+      Nil => None
+      Cons(i, rest) => {
+        perform ref_set(left, rest)
+        Some(LoadAnswer { index: i, got: Ok(concat(key_at(perform ref_get(asked), i), "!")) })
+      }
+    },
+    (s: Stream) => match s {
+      Fetch(key) => Err("not asked")
+      Part(part) => {
+        perform ref_set(out, concat(concat(perform ref_get(out), part), "|"))
+        Ok("")
+      }
+    }
+  )
+  perform ref_get(out)
+}
+
+fn key_at(keys: List(Text), i: u64): Text ! {overflow} {
+  match keys {
+    Nil => ""
+    Cons(k, rest) => if i == 0 { k } else { key_at(rest, i - 1) }
+  }
+}
+
+fn outside(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  let r := request("x")
+  el(t, Tag("p"), Nil, Cons(text_dyn(t, () => shown_load(get(r))), Nil))
+}
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("HTML", () => {
+  assert_case(
+    "the HTML renderer writes the first render, escaped",
+    render_html_in(
+      page
+    ) == "<div title=\"a &quot;b&quot;\">&lt;three&gt; &amp; more<button role=\"button\" aria-label=\"Add\">Add</button><input role=\"textbox\" aria-label=\"Name\" value=\"x\"></div>"
+  )
+  assert_case(
+    "a suspense boundary shows its fallback until its resources load",
+    render_html_in(
+      greeting
+    ) == "<delim-group style=\"display:contents\"><delim-group style=\"display:contents\">…</delim-group></delim-group>"
+  )
+  assert_case(
+    "the server loads the resources before writing the page",
+    render_html_loading(
+      greeting,
+      (key: Text) => if key == "name" { Ok("Ada") } else { Err("?") }
+    ) == "<delim-group style=\"display:contents\"><delim-group style=\"display:contents\"></delim-group><p>Ada</p></delim-group>"
+  )
+  assert_case(
+    "the server clears disabled when a resource enables the same button",
+    render_html_loading(loading_button, (key: Text) => Ok("ready")) == "<button>Run</button>"
+  )
+  assert_case(
+    "trusted HTML is written as it is, and escaped_html escapes",
+    render_html_in(
+      shown
+    ) == "<div><delim-trusted style=\"display:contents\"><b>x</b></delim-trusted><delim-trusted style=\"display:contents\">&lt;b&gt;&quot;&amp;</delim-trusted></div>"
+  )
+  assert_case(
+    "an element that runs code is written as one that shows nothing, and so is a tag that is not a name",
+    render_html_in(
+      scripted
+    ) == "<div><delim-refused hidden>alert(1)</delim-refused><delim-refused hidden></delim-refused></div>"
+  )
+  assert_case(
+    "checked_html takes HTML that runs no code",
+    accepted(
+      "<p class=\"a\">x &amp; y<br><a href=\"/b?c=1&amp;d\">e</a></p><!--3-->"
+    ) && accepted(
+      "<my-card data-x=\"1\" hidden><img src=\"https://example.com/a.png\" alt=\"a\"></my-card>"
+    ) && accepted("")
+  )
+  assert_case(
+    "checked_html refuses scripts, handlers, frames and URLs that run code",
+    not(accepted(
+      "<script>alert(1)</script>"
+    )) && not(accepted(
+      "<img src=x onerror=alert(1)>"
+    )) && not(accepted(
+      "<img src=\"x\" onerror=\"alert(1)\">"
+    )) && not(accepted(
+      "<a href=\"javascript:alert(1)\">x</a>"
+    )) && not(accepted(
+      "<a href=\"javascript&#58;alert(1)\">x</a>"
+    )) && not(accepted(
+      "<iframe srcdoc=\"x\"></iframe>"
+    )) && not(accepted(
+      "<p style=\"x\">"
+    )) && not(accepted(
+      "<svg><a href=\"/\">x</a></svg>"
+    )) && not(accepted(
+      "<textarea><a title=\"</textarea><img src=x onerror=alert(1)>\">"
+    )) && not(accepted("a < b")) && not(accepted("<!-- x -->")) && not(accepted("<P>"))
+  )
+  assert_case("escaped_html escapes", trusted_text(escaped_html("<b>\"&")) == "&lt;b&gt;&quot;&amp;")
+  assert_case(
+    "an island's first render is written, with each node's number",
+    render_html_in(
+      with_island
+    ) == "<delim-island data-name=\"i\" data-props=\"a&quot;b\"><div title=\"a&quot;b\" data-b=\"2\"><!--1-->&lt;x&gt;</div></delim-island>"
+  )
+  assert_case(
+    "a streamed page sends each boundary once its resource loads",
+    streamed(
+      two_boundaries
+    ) == "<div><delim-group style=\"display:contents\" data-g=\"1\"><delim-group style=\"display:contents\" data-g=\"4\">a…</delim-group></delim-group><delim-group style=\"display:contents\" data-g=\"6\"><delim-group style=\"display:contents\" data-g=\"9\">b…</delim-group></delim-group></div>|<template data-for=\"1\"><delim-group style=\"display:contents\" data-g=\"4\"></delim-group><p>a!</p></template>|<template data-for=\"6\"><delim-group style=\"display:contents\" data-g=\"9\"></delim-group><p>b!</p></template>|"
+  )
+  assert_case(
+    "resources loaded together are sent in the order they come",
+    streamed_in(
+      two_boundaries,
+      Cons(1, Cons(0, Nil))
+    ) == "<div><delim-group style=\"display:contents\" data-g=\"1\"><delim-group style=\"display:contents\" data-g=\"4\">a…</delim-group></delim-group><delim-group style=\"display:contents\" data-g=\"6\"><delim-group style=\"display:contents\" data-g=\"9\">b…</delim-group></delim-group></div>|<template data-for=\"6\"><delim-group style=\"display:contents\" data-g=\"9\"></delim-group><p>b!</p></template>|<template data-for=\"1\"><delim-group style=\"display:contents\" data-g=\"4\"></delim-group><p>a!</p></template>|"
+  )
+  assert_case(
+    "a resource given no answer, as past the deadline, fails and the rest is still sent",
+    streamed_in(
+      two_boundaries,
+      Cons(0, Nil)
+    ) == "<div><delim-group style=\"display:contents\" data-g=\"1\"><delim-group style=\"display:contents\" data-g=\"4\">a…</delim-group></delim-group><delim-group style=\"display:contents\" data-g=\"6\"><delim-group style=\"display:contents\" data-g=\"9\">b…</delim-group></delim-group></div>|<template data-for=\"1\"><delim-group style=\"display:contents\" data-g=\"4\"></delim-group><p>a!</p></template>|<template data-for=\"6\"><delim-group style=\"display:contents\" data-g=\"9\"></delim-group><p>the loader gave no answer</p></template>|"
+  )
+  assert_case(
+    "a page loading together rejects a key given no answer",
+    render_html_loading_together(
+      two_boundaries,
+      (keys: List(Text)) => Cons(Ok("x"), Nil)
+    ) == "<div><delim-group style=\"display:contents\"><delim-group style=\"display:contents\"></delim-group><p>x</p></delim-group><delim-group style=\"display:contents\"><delim-group style=\"display:contents\"></delim-group><p>the loader gave no answer</p></delim-group></div>"
+  )
+  assert_case(
+    "a streamed page sends the whole view when a change is outside every boundary",
+    streamed(outside) == "<p>loading</p>|<template data-for=\"app\"><p>x!</p></template>|"
+  )
+  assert_case(
+    "a streamed button loses disabled when its resource finishes",
+    streamed(loading_button) == "<button disabled>Run</button>|<template data-for=\"app\"><button>Run</button></template>|"
+  )
+})

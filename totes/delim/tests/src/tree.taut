@@ -1,0 +1,483 @@
+import std::base { Nat }
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+import "../../src/common.taut" { Role, Vocab }
+import "../../src/signal.taut" {
+  Load,
+  Want,
+  batch,
+  cells,
+  dispose,
+  get,
+  graph,
+  label,
+  memo,
+  peek,
+  reactive,
+  scope,
+  set,
+  signal,
+  update,
+  watch
+}
+import "../../src/tree.taut" {
+  EventData,
+  EventKind,
+  Node,
+  Patch,
+  Prop,
+  Tree,
+  el,
+  fire,
+  keyed_each,
+  show,
+  take_patches,
+  template,
+  text,
+  text_dyn,
+  tree
+}
+import "../../src/component.taut" { error_boundary_in, portal }
+import "../../src/context.taut" { context, use_context, with_context }
+import "../../src/widgets.taut" { button }
+import "../../src/store.taut" { Next, dispatch, just, select, store, take_jobs }
+import "../../src/resource.taut" {
+  Fetched,
+  on_ready,
+  reject,
+  request_as,
+  resolve,
+  resource,
+  resource_as,
+  suspense_in,
+  take_wants
+}
+
+enum Kind {
+  Column
+  Row
+  Pressable
+  Input
+}
+
+enum Style {
+  Gap(i64)
+  Label(Text)
+  Named(Text)
+}
+
+fn role_label(r: Role): Text {
+  match r {
+    Button(n) => n
+    Link(n) => n
+    Checkbox(n) => n
+    TextField(n) => n
+    Tab(n) => n
+    MenuItem(n) => n
+    Heading(l) => "heading"
+    ListBox => "list"
+    ListEntry => "item"
+    Region(n) => n
+    Presentation => ""
+  }
+}
+
+fn vocab(): Vocab(Kind, Style) {
+  Vocab {
+    column: Column,
+    row: Row,
+    pressable: Pressable,
+    input: Input,
+    role: (r: Role) => Named(role_label(r)),
+    name: (n: Text) => Named(n),
+    disabled: (b: Bool) => Gap(0),
+    value: (v: Text) => Label(v)
+  }
+}
+
+// A short trace of the patches, newest last: what was created, set, put and removed.
+fn trace(ps: List(Patch(Kind, Style))): List(Text) ! {div} {
+  match ps {
+    Nil => Nil
+    Cons(p, rest) => Cons(describe(p), trace(rest))
+  }
+}
+
+fn num(n: Node): Text { Text::of_u64(U64::of_u32(n.id)) }
+
+fn describe(p: Patch(Kind, Style)): Text ! {div} {
+  match p {
+    Create(n, k) => concat("create ", num(n))
+    CreateText(n, s) => concat(concat("text ", num(n)), concat(" ", s))
+    CreateGroup(n) => concat("group ", num(n))
+    SetProp(n, s) => match s {
+      Gap(g) => concat("gap ", num(n))
+      Label(l) => concat(concat("label ", num(n)), concat(" ", l))
+      Named(l) => concat(concat("named ", num(n)), concat(" ", l))
+    }
+    SetText(n, s) => concat(concat("set ", num(n)), concat(" ", s))
+    Append(a, b) => concat(concat("append ", num(a)), concat(" ", num(b)))
+    InsertBefore(a, b, c) => concat(
+      concat(concat("insert ", num(a)), concat(" ", num(b))),
+      concat(" before ", num(c))
+    )
+    Remove(n) => concat("remove ", num(n))
+    Template(id, n) => concat("template ", num(n))
+  }
+}
+
+fn joined(l: List(Text)): Text ! {div} {
+  match l {
+    Nil => ""
+    Cons(x, rest) => match rest {
+      Nil => x
+      Cons(y, more) => concat(concat(x, "; "), joined(rest))
+    }
+  }
+}
+
+fn patches_are(t: Tree(Kind, Style), want: Text): Bool ! {div, cells} {
+  joined(trace(take_patches(t))) == want
+}
+
+fn first_want(l: List(Want)): Option(Want) {
+  match l {
+    Nil => None
+    Cons(w, rest) => Some(w)
+  }
+}
+
+enum Msg {
+  Inc
+  Reset
+}
+
+struct Model { count: Nat, name: Text }
+
+fn step(m: Model, msg: Msg): Next(Model, Text) {
+  match msg {
+    Inc => Next {
+      model: Model { count: Nat::add(m.count, 1), name: m.name },
+      jobs: Cons("saved", Nil)
+    }
+    Reset => just(Model { count: 0, name: m.name })
+  }
+}
+
+fn count_text(l: List(Text)): i64 ! {div, overflow} {
+  match l {
+    Nil => 0
+    Cons(x, rest) => 1 + count_text(rest)
+  }
+}
+
+fn read_number(t: Text): Option(i64) {
+  if t == "7" { Some(7) } else if t == "8" { Some(8) } else { None }
+}
+
+fn res_is(r: Fetched(i64), n: i64): Bool {
+  match r {
+    FetchedOk(x) => x == n
+    Fetching => false
+    FetchFailed(why) => false
+  }
+}
+
+fn res_failed(r: Fetched(i64)): Bool {
+  match r {
+    FetchFailed(why) => true
+    FetchedOk(x) => false
+    Fetching => false
+  }
+}
+
+struct Theme { name: Text }
+
+fn themed(): Text ! {context(Theme)} { { let th: Theme := use_context(); th.name } }
+
+fn assert_case(name: Text, ok: Bool): Unit ! {fail(Text)} { expect(ok, name) }
+
+perform test("tree", () => {
+  assert_case("an element sets its static and followed properties", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let s := signal("a")
+    let b := el(t, Pressable, Cons(Static(Gap(2)), Cons(Dyn(() => Label(get(s))), Nil)), Nil)
+    let first := patches_are(t, "create 1; gap 1; label 1 a")
+    set(s, "b")
+    set(s, "b")
+    first && patches_are(t, "label 1 b")
+  }))
+  assert_case("a press runs the handler", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let n := signal((0: Nat))
+    let b := el(t, Pressable, Cons(On(Press, (d: EventData) => set(n, Nat::add(peek(n), 1))), Nil), Nil)
+    fire(t, b, Press, NoData)
+    fire(t, b, Focus, NoData)
+    fire(t, b, Press, NoData)
+    Nat::eq(peek(n), 2)
+  }))
+  assert_case("text follows its signal", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let s := signal("x")
+    let n := text_dyn(t, () => get(s))
+    set(s, "y")
+    patches_are(t, "text 1 x; set 1 y")
+  }))
+  assert_case("show makes and removes its content", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let open := signal(false)
+    let g := show(t, () => get(open), () => text(t, "hi"))
+    let closed := patches_are(t, "group 1")
+    set(open, true)
+    let opened := patches_are(t, "text 2 hi; append 1 2")
+    set(open, false)
+    closed && opened && patches_are(t, "remove 2")
+  }))
+  assert_case("show forgets root and descendant handlers on every close and preserves siblings", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let open := signal(false)
+    let clicks := signal((0: Nat))
+    let child := perform ref_new(Node { id: 0 })
+    let parent := perform ref_new(Node { id: 0 })
+    let sibling := el(t, Pressable, Cons(On(Press, (d: EventData) => update(clicks, (n) => Nat::add(n, 1))), Nil), Nil)
+    let modal := show(t, () => get(open), () => {
+      let b := el(t, Pressable, Cons(On(Press, (d: EventData) => update(clicks, (n) => Nat::add(n, 1))), Nil), Nil)
+      perform ref_set(child, b)
+      let p := el(t, Column, Cons(On(Press, (d: EventData) => update(clicks, (n) => Nat::add(n, 1))), Nil), Cons(b, Nil))
+      perform ref_set(parent, p)
+      p
+    })
+    let initial := take_patches(t)
+    var cycle: Nat := 0
+    var valid := true
+    while Nat::lt(cycle, 10) {
+      set(open, true)
+      let mounted := take_patches(t)
+      let old_child := perform ref_get(child)
+      let old_parent := perform ref_get(parent)
+      fire(t, old_child, Press, NoData)
+      fire(t, old_parent, Press, NoData)
+      set(open, false)
+      valid := valid && patches_are(t, concat("remove ", num(old_parent)))
+      fire(t, old_child, Press, NoData)
+      fire(t, old_parent, Press, NoData)
+      fire(t, sibling, Press, NoData)
+      cycle := Nat::add(cycle, 1)
+      valid := valid && Nat::eq(peek(clicks), Nat::mul(cycle, 3))
+    }
+    valid
+  }))
+  assert_case("each keeps reordered handlers and forgets removed rows and their descendants", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let items := signal(Cons(1, Cons(2, Nil)))
+    let clicks := signal((0: Nat))
+    let first := perform ref_new(Node { id: 0 })
+    let first_child := perform ref_new(Node { id: 0 })
+    let second_child := perform ref_new(Node { id: 0 })
+    let rows := keyed_each(t, () => get(items), (x: i64) => U64::of_i64(x), (x: i64) => {
+      let child := el(t, Pressable, Cons(On(Press, (d: EventData) => update(clicks, (n) => Nat::add(n, 1))), Nil), Nil)
+      let parent := el(t, Column, Cons(On(Press, (d: EventData) => update(clicks, (n) => Nat::add(n, 10))), Nil), Cons(child, Nil))
+      if x == 1 { perform ref_set(first, parent); perform ref_set(first_child, child) } else { perform ref_set(second_child, child) }
+      parent
+    })
+    let initial := take_patches(t)
+    fire(t, perform ref_get(first_child), Press, NoData)
+    fire(t, perform ref_get(second_child), Press, NoData)
+    set(items, Cons(2, Cons(1, Nil)))
+    let moved := take_patches(t)
+    fire(t, perform ref_get(first_child), Press, NoData)
+    let kept := Nat::eq(peek(clicks), 3)
+    set(items, Cons(2, Nil))
+    let removed := patches_are(t, concat("remove ", num(perform ref_get(first))))
+    fire(t, perform ref_get(first), Press, NoData)
+    fire(t, perform ref_get(first_child), Press, NoData)
+    fire(t, perform ref_get(second_child), Press, NoData)
+    let remaining := Nat::eq(peek(clicks), 4)
+    set(items, Nil)
+    let cleared := take_patches(t)
+    fire(t, perform ref_get(second_child), Press, NoData)
+    kept && removed && remaining && Nat::eq(peek(clicks), 4)
+  }))
+  assert_case("each keeps the node of a key that stays", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let items := signal(Cons(1, Cons(2, Nil)))
+    let made := perform ref_new((0: Nat))
+    let g := keyed_each(t, () => get(items), (x: i64) => U64::of_i64(x), (x: i64) => {
+      perform ref_set(made, Nat::add(perform ref_get(made), 1))
+      text(t, Text::of_i64(x))
+    })
+    let first := patches_are(t, "group 1; text 2 1; text 3 2; append 1 2; append 1 3")
+    set(items, Cons(2, Cons(3, Nil)))
+    first && Nat::eq(perform ref_get(made), 3) && patches_are(t, "remove 2; text 4 3; append 1 4")
+  }))
+  assert_case("each gives one row to items with the same key", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let items := signal(Cons(1, Cons(1, Cons(2, Nil))))
+    let g := keyed_each(t, () => get(items), (x: i64) => U64::of_i64(x), (x: i64) => text(t, Text::of_i64(x)))
+    let first := patches_are(t, "group 1; text 2 1; text 3 2; append 1 2; append 1 3")
+    set(items, Cons(2, Cons(1, Cons(1, Nil))))
+    let moved := patches_are(t, "insert 1 3 before 2")
+    set(items, Cons(1, Nil))
+    first && moved && patches_are(t, "remove 3")
+  }))
+  assert_case("a resource resolved twice does not end its boundary's wait for another", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let g := suspense_in(t, () => text(t, "wait"), () => {
+      let a := resource(t, "a")
+      let b := resource(t, "b")
+      text(t, "body")
+    })
+    let ws := take_wants()
+    let before := take_patches(t)
+    match first_want(ws) {
+      None => false
+      Some(w) => {
+        resolve(w, "x")
+        resolve(w, "y")
+        reject(w, "z")
+        let state := match peek(w.state) {
+          Loaded(v) => v == "x"
+          Loading => false
+          LoadFailed(why) => false
+        }
+        state && patches_are(t, "")
+      }
+    }
+  }))
+  assert_case("a store's select runs its readers only when its slice changes", reactive(() => {
+    let s := store(Model { count: 0, name: "n" }, (m, msg) => step(m, msg))
+    let name := select(s, (m: Model) => m.name)
+    let count := select(s, (m: Model) => m.count)
+    let name_runs := perform ref_new((0: Nat))
+    watch(() => {
+      let x := get(name)
+      perform ref_set(name_runs, Nat::add(perform ref_get(name_runs), 1))
+    })
+    dispatch(s, Inc)
+    dispatch(s, Inc)
+    let jobs := take_jobs(s)
+    Nat::eq(peek(count), 2) && Nat::eq(perform ref_get(name_runs), 1) && count_text(jobs) == 2
+  }))
+  assert_case("an edit handler gets the committed text", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let v := signal("")
+    let f := el(t, Pressable, Cons(On(Edit, (d: EventData) => match d {
+      NoData => #()
+      KeyData(k) => #()
+      TextData(x) => set(v, x)
+      Pointer(x, y, b) => #()
+      ScrollData(dx, dy) => #()
+    }), Nil), Nil)
+    fire(t, f, Edit, TextData("hello"))
+    peek(v) == "hello"
+  }))
+  assert_case("a batch runs a watcher once after all its writes", reactive(() => {
+    let a := signal((1: Nat))
+    let b := signal((2: Nat))
+    let runs := perform ref_new((0: Nat))
+    watch(() => {
+      let x := Nat::add(get(a), get(b))
+      perform ref_set(runs, Nat::add(perform ref_get(runs), 1))
+    })
+    batch(() => {
+      set(a, 10)
+      set(b, 20)
+    })
+    Nat::eq(perform ref_get(runs), 2)
+  }))
+  assert_case("each moves only the rows outside the longest kept order", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let items := signal(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+    let g := keyed_each(t, () => get(items), (x: i64) => U64::of_i64(x), (x: i64) => text(t, Text::of_i64(x)))
+    let first := take_patches(t)
+    // nodes: 2 → 1, 3 → 2, 4 → 3, 5 → 4
+    set(items, Cons(4, Cons(1, Cons(2, Cons(3, Nil)))))
+    patches_are(t, "insert 1 5 before 2")
+  }))
+  assert_case("a shared button is named, shows its label, and runs on press", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let n := signal((0: Nat))
+    let b := button(t, vocab(), "Add", () => set(n, Nat::add(peek(n), 1)))
+    let shape := patches_are(t, "text 1 Add; create 2; named 2 Add; append 2 1")
+    fire(t, b, Press, NoData)
+    shape && Nat::eq(peek(n), 1)
+  }))
+  assert_case("a template marks the subtree it built", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let a := template(t, 7, () => text(t, "a"))
+    patches_are(t, "text 1 a; template 1")
+  }))
+  assert_case("a typed resource is pending, then ready with its value", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let r := resource_as(t, "n", read_number)
+    let pending := match peek(r) {
+      Fetching => true
+      FetchedOk(x) => false
+      FetchFailed(why) => false
+    }
+    match first_want(take_wants()) {
+      None => false
+      Some(w) => {
+        resolve(w, "7")
+        pending && res_is(peek(r), 7)
+      }
+    }
+  }))
+  assert_case("a typed resource whose text does not read is failed", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let r := resource_as(t, "n", read_number)
+    match first_want(take_wants()) {
+      None => false
+      Some(w) => {
+        resolve(w, "nope")
+        res_failed(peek(r))
+      }
+    }
+  }))
+  assert_case("a handler waits with request_as and on_ready, which runs once", reactive(() => {
+    let seen: Ref(List(i64)) := perform ref_new(Nil)
+    let r := request_as("n", read_number)
+    on_ready(r, (x: i64) => perform ref_set(seen, Cons(x, perform ref_get(seen))))
+    match first_want(take_wants()) {
+      None => false
+      Some(w) => {
+        let before := match perform ref_get(seen) { Nil => true, Cons(_, _) => false }
+        resolve(w, "8")
+        resolve(w, "7")
+        before && match perform ref_get(seen) { Cons(8, Nil) => true, Cons(_, Nil) => false, Nil => false, Cons(_, Cons(_, _)) => false }
+      }
+    }
+  }))
+  assert_case("a context is read below with_context, and the nearest one wins", with_context(Theme { name: "dark" }, () => {
+    let outer := themed()
+    let inner := with_context(Theme { name: "light" }, () => themed())
+    outer == "dark" && inner == "light"
+  }))
+  assert_case("an error boundary shows its fallback when the body fails", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let n := error_boundary_in(t, () => {
+      perform fail("bad")
+      text(t, "body")
+    }, (why: Text) => text(t, concat("failed: ", why)))
+    patches_are(t, "text 1 failed: bad")
+  }))
+  assert_case("an error boundary leaves a body that does not fail as it is", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let n := error_boundary_in(t, () => text(t, "body"), (why: Text) => text(t, why))
+    patches_are(t, "text 1 body")
+  }))
+  assert_case("a portal puts its body under the target and removes it when its owner ends", reactive(() => {
+    let t: Tree(Kind, Style) := tree()
+    let target := el(t, Column, Nil, Nil)
+    let s := scope(() => portal(t, target, () => text(t, "modal")))
+    let placed := patches_are(t, "create 1; group 2; text 3 modal; append 1 3")
+    dispose(s.owner)
+    placed && patches_are(t, "remove 3")
+  }))
+  assert_case("graph names the signals and who reads them", reactive(() => {
+    let a := label(signal((1: Nat)), "count")
+    let m := memo(() => Nat::mul(get(a), 2))
+    let sink := perform ref_new((0: Nat))
+    watch(() => perform ref_set(sink, get(m)))
+    graph() == "signal count#1 is read by [3]\nsignal 2 is read by [4]\nwatcher 3 reads [count#1]\nwatcher 4 reads [2]\n"
+  }))
+})

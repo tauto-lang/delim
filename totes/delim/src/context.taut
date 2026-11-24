@@ -1,0 +1,16 @@
+// Context: a value the components below a point can read without being handed it. It is the
+// effect `context(A)`, one instance for each type `A`: `with_context(v, body)` handles it for
+// `body` (`provide` in `ui.taut` for a view), and `use_context()` performs it. A component that reads a context has
+// `context(A)` in its type, so one used outside any `provide` does not type-check. To give
+// one type two contexts, wrap the values in different structs.
+
+pub effect context<A>(): A direct
+
+pub fn use_context<A>(): A ! {context(A)} { perform context() }
+
+pub fn with_context<A, T, !e>(value: A, body: () -> T ! {context(A)} ∪ e): T ! e {
+  handle { body() } with {
+    context<A>(), k => k(value)
+    return v => v
+  }
+}

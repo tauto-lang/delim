@@ -1,0 +1,217 @@
+// What the DOM renderer writes for drawing and placing elements, beside the HTML of
+// `policy.taut`: SVG elements and their attributes, and CSS custom properties with typed
+// numbers. The HTML renderer writes none of them: `html_safe` (`safe.taut`) has no SVG and no
+// `style`, and these lists are not read by the kernel.
+
+// ---- SVG ----------------------------------------------------------------------------------
+
+// SVG elements that draw shapes and text, group them and describe them. Left out: `script`,
+// `style`, `foreignObject` (HTML inside), `a`, `use`, `image`, `feImage` (they load or link
+// to other documents), `animate`, `animateMotion`, `animateTransform` and `set` (they change
+// attributes, `href` among them, after the renderer checked them).
+pub fn svg_tags(): List(Text) {
+  [
+    "svg",
+    "g",
+    "defs",
+    "title",
+    "desc",
+    "path",
+    "line",
+    "polyline",
+    "polygon",
+    "circle",
+    "ellipse",
+    "rect",
+    "text",
+    "tspan",
+    "marker",
+    "linearGradient",
+    "radialGradient",
+    "stop",
+    "clipPath",
+    "mask",
+    "pattern",
+    "symbol"
+  ]
+}
+
+// Presentation and geometry attributes of SVG. Left out: every `on…` handler, `style`, `href`
+// and `xlink:href`, and the attributes that name what to animate.
+pub fn svg_attrs(): List(Text) {
+  [
+    "viewBox",
+    "preserveAspectRatio",
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "width",
+    "height",
+    "d",
+    "points",
+    "pathLength",
+    "transform",
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-width",
+    "stroke-opacity",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "opacity",
+    "vector-effect",
+    "pointer-events",
+    "visibility",
+    "display",
+    "clip-path",
+    "clip-rule",
+    "mask",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
+    "markerWidth",
+    "markerHeight",
+    "markerUnits",
+    "refX",
+    "refY",
+    "orient",
+    "offset",
+    "stop-color",
+    "stop-opacity",
+    "gradientUnits",
+    "gradientTransform",
+    "spreadMethod",
+    "fx",
+    "fy",
+    "patternUnits",
+    "patternTransform",
+    "text-anchor",
+    "dominant-baseline",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "dx",
+    "dy",
+    "textLength",
+    "lengthAdjust",
+    "paint-order"
+  ]
+}
+
+fn one_of_text(x: Text, l: List(Text)): Bool ! {div, overflow} {
+  match l {
+    Nil => false
+    Cons(y, rest) => x == y || one_of_text(x, rest)
+  }
+}
+
+fn byte_of(t: Text, i: u64): u64 {
+  match Text::byte(t, i) {
+    Some(b) => U64::of_u8(b)
+    None => 0
+  }
+}
+
+fn letter_or_digit(b: u64): Bool {
+  (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+// A byte of an SVG value: a letter, a digit, space, or one of `.,-+#%()_`. There is no `:`, so
+// no scheme, no `;`, `"`, `'`, `<`, `>` or `&`, so nothing that ends the value or starts markup.
+fn svg_value_byte(b: u64): Bool {
+  letter_or_digit(b) || b == 32 || b == 46 || b == 44 || b == 45 || b == 43 || b == 35 || b == 37 || b == 40 || b == 41 || b == 95
+}
+
+fn lower(b: u64): u64 ! {overflow} { if b >= 65 && b <= 90 { b + 32 } else { b } }
+
+// Whether `url(` starts at `i` (in any case) and is not followed by `#`: a reference to
+// anything but a fragment of the page.
+fn far_url_at(v: Text, i: u64): Bool ! {div, overflow} {
+  lower(
+    byte_of(v, i)
+  ) == 117 && lower(
+    byte_of(v, i + 1)
+  ) == 114 && lower(byte_of(v, i + 2)) == 108 && byte_of(v, i + 3) == 40 && byte_of(v, i + 4) != 35
+}
+
+fn svg_value_from(v: Text, i: u64): Bool ! {div, overflow} {
+  if i >= Text::len(v) { true } else {
+    svg_value_byte(byte_of(v, i)) && not(far_url_at(v, i)) && svg_value_from(v, i + 1)
+  }
+}
+
+// Whether the DOM renderer creates the SVG element `tag`.
+pub fn svg_tag_ok(tag: Text): Bool ! {div, overflow} { one_of_text(tag, svg_tags()) }
+
+// Whether the DOM renderer writes `name="value"` on an SVG element: the name from the list,
+// and the value of the bytes above, with `url(` only for a fragment (`url(#id)`).
+pub fn svg_attr_ok(name: Text, value: Text): Bool ! {div, overflow} {
+  one_of_text(name, svg_attrs()) && svg_value_from(value, 0)
+}
+
+pub fn svg_tag_refusal(tag: Text): Text {
+  concat(
+    concat("`", tag),
+    "` is not an SVG element delim writes: it may run code or load a document"
+  )
+}
+
+pub fn svg_attr_refusal(name: Text): Text {
+  concat(
+    concat("`", name),
+    "` is not an SVG attribute delim writes, or its value has a byte other than letters, digits, space and `.,-+#%()_`, or a `url(` that is not `url(#…)`"
+  )
+}
+
+// ---- CSS custom properties ----------------------------------------------------------------
+
+// A number for a CSS custom property. The value is written from the number and its unit, so
+// it is always a single CSS number: it cannot end the declaration or name a URL.
+pub(open) enum Css {
+  Px(i64)
+  Pct(i64)
+  Num(i64)
+  Deg(i64)
+  // Removes the property.
+  Unset
+}
+
+// The CSS text of a value; "" for `Unset`.
+pub fn css_text(v: Css): Text {
+  match v {
+    Px(n) => concat(Text::of_i64(n), "px")
+    Pct(n) => concat(Text::of_i64(n), "%")
+    Num(n) => Text::of_i64(n)
+    Deg(n) => concat(Text::of_i64(n), "deg")
+    Unset => ""
+  }
+}
+
+fn var_rest(name: Text, i: u64): Bool ! {div, overflow} {
+  if i >= Text::len(name) { true } else {
+    let b := byte_of(name, i)
+    (letter_or_digit(b) || b == 45 || b == 95) && var_rest(name, i + 1)
+  }
+}
+
+// Whether `name` is a custom property delim sets: `--`, then letters, digits, `-` and `_`,
+// at most 64 bytes. A page's style sheet reads it with `var(--name)`; no other property of
+// `style` is written.
+pub fn var_ok(name: Text): Bool ! {div, overflow} {
+  Text::len(name) > 2 && Text::len(name) <= 64 && byte_of(
+    name,
+    0
+  ) == 45 && byte_of(name, 1) == 45 && var_rest(name, 2)
+}

@@ -1,0 +1,208 @@
+import "../../delim/src/common.taut" { Role, Vocab }
+import "policy.taut" { Attr, tag_allowed, tag_void, url_allowed }
+import "safe.taut" { TrustedHtml, checked_bytes, escaped_bytes, trusted_bytes }
+import "svg.taut" { Css }
+
+// What the DOM renderer and the HTML one share: element kinds are tag names and properties
+// are attributes.
+
+pub(open) enum HtmlKind {
+  Tag(Text)
+  // An island named `name`, with the text its view starts from and its first render as
+  // HTML: the browser hydrates it alone, the rest of the page stays as the server wrote it.
+  Island(Text, Text, TrustedHtml)
+  // HTML written as it is, by `trusted`.
+  Trusted(TrustedHtml)
+  // An SVG element (`svg.taut` lists them), made in the SVG namespace by the DOM renderer.
+  // The HTML renderer writes it as a refused element: `html_safe` has no SVG.
+  Svg(Text)
+}
+
+// HTML written into a page as it is: a `TrustedHtml` (`safe.taut`), whose bytes come with a
+// proof that `html_safe` accepts them. Every other text a view shows is escaped.
+
+// Text as HTML that shows it: `&`, `<`, `>` and `"` escaped.
+pub fn escaped_html(t: Text): TrustedHtml ! {div, overflow} { escaped_bytes(bytes_of(t)) }
+
+// `html` as trusted HTML, when `html_safe` accepts it: the output of a renderer such as a
+// Markdown or highlighting one, checked as it is written into the page. `None` when it has
+// anything `html_safe` refuses, such as a script, a handler, or a URL that runs code.
+pub fn checked_html(html: Text): Option(TrustedHtml) ! {div, overflow} {
+  checked_bytes(bytes_of(html))
+}
+
+// The HTML as text.
+pub fn trusted_text(h: TrustedHtml): Text ! {div, overflow} { text_of_byte_list(trusted_bytes(h)) }
+
+pub(open) enum HtmlAttr {
+  Attr(Text, Text)
+  // A role for assistive technology and the element's name; an empty name sets none.
+  Aria(Text, Text)
+  // The live DOM value; HTML uses textarea text, select option selection, or an attribute.
+  Value(Text)
+  Disabled(Bool)
+  Checked(Bool)
+  Selected(Bool)
+  Multiple(Bool)
+  Hidden(Bool)
+  Required(Bool)
+  ReadOnly(Bool)
+  // None removes the attribute; names and present values still pass the policy.
+  OptionalAttr(Text, Option(Text))
+  // An attribute of an SVG element, from the list in `svg.taut`.
+  SvgAttr(Text, Text)
+  // A CSS custom property (`--name`) of the element, for its style sheet to read with
+  // `var(--name)`: how a view places and sizes an element. Only the DOM renderer sets it.
+  Var(Text, Css)
+  // Whether a press on the element (or inside it) that moves becomes a drag: the element then
+  // holds the pointer and gets `DragStart`, `DragMove` and `DragEnd`, and the node it is let
+  // go over gets `Drop`. Only the DOM renderer has drags.
+  DragSource(Bool)
+}
+
+pub fn web_vocab(): Vocab(HtmlKind, HtmlAttr) {
+  Vocab {
+    column: Tag("div"),
+    row: Tag("div"),
+    pressable: Tag("button"),
+    input: Tag("input"),
+    role: (r: Role) => match r {
+      Button(l) => Aria("button", l)
+      Link(l) => Aria("link", l)
+      Checkbox(l) => Aria("checkbox", l)
+      TextField(l) => Aria("textbox", l)
+      Tab(l) => Aria("tab", l)
+      MenuItem(l) => Aria("menuitem", l)
+      Heading(level) => Aria("heading", "")
+      ListBox => Aria("listbox", "")
+      ListEntry => Aria("option", "")
+      Region(l) => Aria("region", l)
+      Presentation => Aria("presentation", "")
+    },
+    name: (l: Text) => Attr("aria-label", l),
+    disabled: (b: Bool) => Disabled(b),
+    value: (v: Text) => Value(v)
+  }
+}
+
+fn digit(d: u64): Text ! {overflow} {
+  match Text::slice("0123456789", d, d + 1) {
+    Some(x) => x
+    None => "0"
+  }
+}
+
+pub fn decimal(n: u64): Text ! {div, overflow} {
+  if n < 10 { digit(n) } else { concat(decimal(div(n, 10)), digit(mod(n, 10))) }
+}
+
+// ---- what may be written --------------------------------------------------------------------
+// Both renderers write only what `policy.taut` allows: a tag from its list of elements, an
+// attribute from its list of attributes, and a URL relative to the page or with the scheme
+// `http`, `https`, `mailto` or `tel`.
+
+pub fn holds(y: Bool): Bool {
+  match y { true => true, false => false }
+}
+
+// The bytes of `t`, as `policy.taut` reads them.
+pub fn bytes_of(t: Text): List(Nat) ! {div, overflow} { bytes_before(t, Text::len(t), Nil) }
+
+fn bytes_before(t: Text, i: u64, acc: List(Nat)): List(Nat) ! {div, overflow} {
+  if i == 0 { acc } else {
+    match Text::byte(t, i - 1) {
+      Some(b) => bytes_before(t, i - 1, Cons(Nat::of_u64(U64::of_u8(b)), acc))
+      None => acc
+    }
+  }
+}
+
+// Keep byte conversion tail recursive: a rendered document can have many more
+// bytes than the host stack can hold, even when its DOM tree is shallow.
+fn reverse_u8s(w: List(u8), acc: List(u8)): List(u8) ! {div, overflow} {
+  match w {
+    Nil => acc
+    Cons(c, rest) => reverse_u8s(rest, Cons(c, acc))
+  }
+}
+fn u8s_before(w: List(Nat), acc: List(u8)): List(u8) ! {div, overflow} {
+  match w {
+    Nil => reverse_u8s(acc, Nil)
+    Cons(c, rest) => u8s_before(rest, Cons(U8::of_u64(U64::of_nat(c)), acc))
+  }
+}
+fn u8s_of(w: List(Nat)): List(u8) ! {div, overflow} { u8s_before(w, Nil) }
+
+// The text of bytes that came from a text: "" if they are not UTF-8.
+pub fn text_of_byte_list(w: List(Nat)): Text ! {div, overflow} {
+  match Text::of_utf8(u8s_of(w)) {
+    Some(t) => t
+    None => ""
+  }
+}
+
+pub fn tag_ok(tag: Text): Bool ! {div, overflow} { holds(tag_allowed(bytes_of(tag))) }
+
+fn tag_is_void(tag: Text): Bool ! {div, overflow} { holds(tag_void(bytes_of(tag))) }
+
+pub module Attr {
+  fn ok(name: Text, value: Text): Bool ! {div, overflow} {
+    holds(Attr::value_allowed(bytes_of(name), bytes_of(value)))
+  }
+
+  pub fn refusal(name: Text): Text ! {div, overflow} {
+    if starts_with(name, "on") { "a handler is an `on:` event, not an `on…` attribute" } else {
+      concat(
+        concat("`", name),
+        "` is not an attribute delim writes: it may run code, or it is not one of HTML"
+      )
+    }
+  }
+
+  // Why the attribute `name` may not be written, if it may not.
+  fn name_refused(name: Text): Option(Text) ! {div, overflow} {
+    if holds(Attr::allowed(bytes_of(name))) { None } else { Some(Attr::refusal(name)) }
+  }
+
+  // Why `name="value"` may not be written, if it may not.
+  pub fn refused(name: Text, value: Text): Option(Text) ! {div, overflow} {
+    if Attr::ok(name, value) { None } else {
+      match Attr::name_refused(name) {
+        Some(why) => Some(why)
+        None => Some(url_refusal())
+      }
+    }
+  }
+}
+
+pub fn starts_with(t: Text, prefix: Text): Bool ! {div, overflow} {
+  match Text::slice(t, 0, Text::len(prefix)) {
+    Some(head) => head == prefix
+    None => false
+  }
+}
+
+// What the renderers and `view!` say about a refused tag, attribute and URL.
+pub fn tag_refusal(tag: Text): Text {
+  concat(
+    concat("`", tag),
+    "` is not an element delim writes: it may run code, or it is not one of HTML"
+  )
+}
+
+pub fn url_refusal(): Text {
+  "a URL is written only relative to the page or with `http:`, `https:`, `mailto:` or `tel:`, and with no `&`, `<`, `>` or `\"` before its path"
+}
+
+// Why the tag `tag` may not be written, if it may not.
+pub fn tag_refused(tag: Text): Option(Text) ! {div, overflow} {
+  if tag_ok(tag) { None } else { Some(tag_refusal(tag)) }
+}
+
+// The tag written for `tag`: itself, or, when it is refused, an element that shows nothing.
+pub fn written_tag(tag: Text): Text ! {div, overflow} {
+  if tag_ok(tag) { tag } else { "delim-refused" }
+}
+
+// Whether `value` of a URL attribute may be written.
+pub fn url_ok(value: Text): Bool ! {div, overflow} { holds(url_allowed(bytes_of(value))) }

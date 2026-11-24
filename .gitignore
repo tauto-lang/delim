@@ -1,0 +1,9 @@
+*
+!*/
+!.gitignore
+
+!/README.md
+!/CHANGELOG.md
+!/SECURITY.md
+!/LICENSE-MIT
+!/LICENSE-APACHE

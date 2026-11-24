@@ -1,0 +1,228 @@
+import std::builtin::par {
+  Mutex,
+  MutexGuard,
+  Ref,
+  mutex_new,
+  ref_get,
+  ref_new,
+  ref_set,
+  weak_get,
+  weak_of
+}
+import "signal.taut" {
+  Load,
+  Signal,
+  current,
+  dispose,
+  get,
+  memo,
+  on_cleanup,
+  peek,
+  rt,
+  scope,
+  set,
+  signal,
+  untracked,
+  watch
+}
+import "handle.taut" {
+  Resource,
+  ResourceState,
+  resource_cancelled,
+  resource_handle,
+  resource_wait,
+  state
+}
+import "resource.taut" { request }
+
+pub(open) enum ActionPolicy { IgnoreWhilePending, LatestWins }
+pub(open) effect action_live(): Bool direct
+pub fn commit_current(body: () -> Unit ! {rt, div}): Unit ! {rt, div, action_live} {
+  if perform action_live() { body() } else { #() }
+}
+// `on_cancel(f)` in a run: `f()` runs if the run ends without settling (stopped, invalidated,
+// replaced by a newer run, or its owner disposed), and not once it has settled.
+pub(open) effect action_on_cancel(): Ref(Bool) direct
+pub fn on_cancel(f: () -> Unit ! {rt, div}): Unit ! {rt, action_on_cancel} {
+  // Whether the run has settled, read when its owner ends.
+  let settled := perform action_on_cancel()
+  on_cleanup(() => if perform ref_get(settled) { #() } else { f() })
+}
+pub(open) struct ActionOptions(
+  A: Shared + NoBorrow,
+  B: Shared + NoBorrow,
+  E: Shared + NoBorrow,
+  I: Shared + NoBorrow,
+  R: Shared + NoBorrow
+) {
+  policy: ActionPolicy,
+  // What the action's input depends on: when what it reads changes, the current run is
+  // cancelled and its result cleared. It never starts a run.
+  invalidate_on: () -> I ! {rt, div},
+  run: (input: A) -> B ! {
+    rt,
+    div,
+    resource_wait(R, E),
+    resource_cancelled,
+    fail(E),
+    action_live,
+    action_on_cancel
+  },
+  // Runs once when a run succeeds, before its `Ready` is published; never after it is cancelled.
+  on_success: (value: B) -> Unit ! {rt, div}
+}
+
+// Starts loading the resource named `key` now; reading it is independent of where it started.
+pub fn use_res(key: Text): Resource(Text, Text) ! {rt, div} {
+  let load := request(key)
+  resource_handle(memo(() => match get(load) {
+    Loading => Pending
+    Loaded(value) => Ready(value)
+    LoadFailed(why) => Failed(why)
+  }))
+}
+pub(open) struct(shared) Action(A: Shared + NoBorrow, B: Shared + NoBorrow, E: Shared + NoBorrow) {
+  start: (input: A) -> Unit ! {rt, div},
+  cancel: () -> Unit ! {rt, div},
+  clear: () -> Unit ! {rt, div},
+  pending: () -> Bool ! {rt},
+  result: () -> Option(Resource(B, E)) ! {rt}
+}
+// Whether the current run still counts is read in place: this frame holds no suspended run.
+fn with_live<B: Shared + NoBorrow, E: Shared + NoBorrow, R: Shared + NoBorrow>(
+  live: Ref(Bool),
+  settled: Ref(Bool),
+  result: delim::src::signal::Signal(ResourceState(B, E)),
+  body: affine () -> Unit ! {
+    rt,
+    div,
+    resource_wait(R, E),
+    resource_cancelled,
+    fail(E),
+    action_live,
+    action_on_cancel
+  }
+): Unit ! {rt, div, resource_wait(R, E), resource_cancelled, fail(E)} {
+  handle { body() } with {
+    action_live(), k => k(perform ref_get(live))
+    action_on_cancel(), k => k(settled)
+    return value => value
+  }
+}
+fn resume_action<B: Shared + NoBorrow, E: Shared + NoBorrow, R: Shared + NoBorrow>(
+  body: affine () -> Unit ! {rt, div, resource_wait(R, E), resource_cancelled, fail(E)},
+  live: Ref(Bool),
+  settled: Ref(Bool),
+  result: delim::src::signal::Signal(ResourceState(B, E))
+): Unit ! {rt, div} {
+  handle {
+    body()
+  } with {
+    resource_wait<R, E>(resource), k => {
+      // The affine continuation is consumed once, even if the resource changes again.
+      // The owner's cleanup holds the continuation; the watcher only looks at it.
+      let continuation := perform ref_new(perform mutex_new(Some(k)))
+      on_cleanup(() => { let held := perform ref_get(continuation); #() })
+      let waiting := perform weak_of(continuation)
+      watch(() => match match state(resource) { Pending => false, Ready(_) => true, Failed(_) => true, Cancelled => true } {
+        false => #()
+        true => match perform weak_get(waiting) {
+          None => #()
+          Some(slot) => {
+            var guard := Mutex::lock(perform ref_get(slot))
+            let next := replace(MutexGuard::get_mut(&mut guard), None)
+            match next {
+              Some(continue_once) => if perform ref_get(live) {
+                // The run waits on `R` again: the written type says so where nothing else does.
+                let again: affine () -> Unit ! {rt, div, resource_wait(R, E), resource_cancelled, fail(E)} := () => continue_once(#())
+                resume_action(again, live, settled, result)
+              } else { #() }
+              None => #()
+            }
+          }
+        }
+      })
+    }
+    fail<E>(error) => if perform ref_get(live) {
+      perform ref_set(settled, true); set(result, Failed(error)); perform ref_set(live, false)
+    } else { #() }
+    resource_cancelled() => if perform ref_get(live) {
+      set(result, Cancelled); perform ref_set(live, false)
+    } else { #() }
+    return value => value
+  }
+}
+pub fn use_action<A: Shared + NoBorrow, B: Shared + NoBorrow, E: Shared + NoBorrow, I: Shared + NoBorrow, R: Shared + NoBorrow>(
+  options: ActionOptions(A, B, E, I, R)
+): Action(A, B, E) ! {rt, div} {
+  let latest: delim::src::signal::Signal(
+    Option(delim::src::signal::Signal(ResourceState(B, E)))
+  ) := signal(None)
+  let live := perform ref_new(perform ref_new(false))
+  let child := perform ref_new(None)
+  let cancel := () => {
+    perform ref_set(perform ref_get(live), false)
+    match peek(latest) {
+      Some(value) => match peek(value) {
+        Pending => set(value, Cancelled),
+        Ready(_) => #(),
+        Failed(_) => #(),
+        Cancelled => #()
+      }
+      None => #()
+    }
+    match perform ref_get(child) {
+      Some(owner) => { perform ref_set(child, None); dispose(owner) },
+      None => #()
+    }
+  }
+  on_cleanup(cancel)
+  let watched := perform ref_new(false)
+  watch(() => {
+    let input := (options.invalidate_on)()
+    if perform ref_get(watched) { untracked(() => { cancel(); set(latest, None) }) } else { perform ref_set(watched, true) }
+  })
+  let owner := perform ref_get(current().owner)
+  Action {
+    start: input => {
+      let busy := match peek(latest) {
+        Some(value) => match peek(value) {
+          Pending => true,
+          Ready(_) => false,
+          Failed(_) => false,
+          Cancelled => false
+        },
+        None => false
+      }
+      if busy && options.policy == IgnoreWhilePending { #() } else {
+        cancel()
+        let active := perform ref_new(true)
+        perform ref_set(live, active)
+        let value: delim::src::signal::Signal(ResourceState(B, E)) := signal(Pending)
+        set(latest, Some(value))
+        let runtime := current()
+        let previous := perform ref_get(runtime.owner)
+        perform ref_set(runtime.owner, owner)
+        let settled := perform ref_new(false)
+        let invocation := scope(() => resume_action(() => with_live(active, settled, value, () => {
+          let answer := (options.run)(input)
+          if perform ref_get(active) { perform ref_set(settled, true); (options.on_success)(answer); set(value, Ready(answer)); perform ref_set(active, false) } else { #() }
+        }), active, settled, value))
+        perform ref_set(runtime.owner, previous)
+        perform ref_set(child, Some(invocation.owner))
+      }
+    },
+    cancel: cancel,
+    clear: () => { cancel(); set(latest, None) },
+    pending: () => match get(latest) {
+      Some(value) => match get(value) {
+        Pending => true,
+        Ready(_) => false,
+        Failed(_) => false,
+        Cancelled => false
+      },
+      None => false
+    },
+    result: () => match get(latest) { Some(value) => Some(resource_handle(value)), None => None }
+  }
+}

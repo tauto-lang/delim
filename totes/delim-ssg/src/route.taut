@@ -1,0 +1,49 @@
+import "../../delim/src/signal.taut" { rt }
+import "../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../delim/src/tree.taut" { Node, Prop, Tree, el }
+import "site.taut" { Page }
+import "url.taut" { percent_encode }
+
+// A page and the address it is written at. A page with arguments is a function that gives its
+// route, such as `fn post_route(p: Post): Route`; a link is made from the same route, so a link
+// only names an address that is written.
+pub(open) struct(shared) Route { path: Text, page: Page }
+
+// The route of `page` at the path of `segments`, each escaped: `["posts", "a b"]` is
+// `/posts/a%20b`, and no segment is `[]`, which is `/`.
+pub fn route(segments: List(Text), page: Page): Route ! {overflow, div} {
+  Route { path: path_of_segments(segments), page: page }
+}
+
+// `/` and the segments, each escaped, after a `/`.
+pub fn path_of_segments(segments: List(Text)): Text ! {overflow, div} {
+  match segments {
+    Nil => "/"
+    Cons(_, _) => joined(segments)
+  }
+}
+
+fn joined(l: List(Text)): Text ! {overflow, div} {
+  match l {
+    Nil => ""
+    Cons(s, rest) => concat(concat("/", percent_encode(s)), joined(rest))
+  }
+}
+
+// A link to `r`.
+pub fn link(t: Tree(HtmlKind, HtmlAttr), r: Route, children: List(Node)): Node ! {rt, div} {
+  el(t, Tag("a"), [Static(Attr("href", r.path))], children)
+}
+
+// The route of each of `rs`, for a site that names its pages by a type of its own: the path of
+// each from its segments, and its page.
+pub fn routes_of<R: Shared>(
+  rs: List(R),
+  segments: (r: R) -> List(Text) ! {overflow, div},
+  page: (r: R) -> Page ! {overflow, div}
+): List(Route) ! {overflow, div} {
+  match rs {
+    Nil => Nil
+    Cons(r, rest) => Cons(route(segments(r), page(r)), routes_of(rest, segments, page))
+  }
+}

@@ -1,0 +1,11 @@
+import "../../src/url.taut" { percent_decode, percent_encode }
+import "check.taut" { check }
+
+perform test("url", () => {
+  check(
+    "percent-encoding round-trips any text",
+    percent_decode(
+      percent_encode("a/b ?#%é")
+    ) == Some("a/b ?#%é") && percent_decode("%e") == None && percent_decode("%ff") == None
+  )
+})

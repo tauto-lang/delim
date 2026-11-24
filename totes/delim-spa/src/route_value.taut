@@ -1,0 +1,234 @@
+import "codec.taut" { Codec }
+import "url.taut" { percent_decode, percent_encode }
+
+// Custom types provide Type::route_codec(): Codec(Type), using the same codec as primitives.
+pub fn route_bool_codec(): Codec(Bool) {
+  Codec { schema: "route-value/v1",
+    decode: (value: Text) => if value == "true" { Some(true) } else if value == "false" {
+      Some(false)
+    } else { None },
+    encode: (value: Bool) => if value { "true" } else { "false" }
+  }
+}
+
+pub(open) enum RouteError {
+  NoRoute
+  MalformedQuery
+  MissingParameter(Text)
+  InvalidParameter(Text)
+}
+pub(open) struct(shared) RouteQueryValue { name: Text, value: Text }
+
+fn route_slice(value: Text, start: u64, end: u64): Text {
+  match Text::slice(value, start, end) { Some(part) => part
+    None => "" }
+}
+fn route_find(value: Text, byte: u64, start: u64): u64 ! {overflow, div} {
+  match Text::byte(value, start) {
+    None => start
+    Some(c) => if U64::of_u8(c) == byte { start } else { route_find(value, byte, start + 1) }
+  }
+}
+fn route_plus(value: Text, start: u64): Text ! {overflow, div} {
+  let end := route_find(value, 43, start)
+  let before := route_slice(value, start, end)
+  if end < Text::len(value) { concat(before, concat(" ", route_plus(value, end + 1))) } else { before }
+}
+fn route_decode(value: Text): Option(Text) ! {overflow, div} {
+  percent_decode(route_plus(value, 0))
+}
+
+fn route_query_parts(
+  query: Text,
+  start: u64
+): Result(List(RouteQueryValue), RouteError) ! {overflow, div} {
+  if start >= Text::len(query) { Ok(Nil) } else {
+    let end := route_find(query, 38, start)
+    let pair := route_slice(query, start, end)
+    let equals := route_find(pair, 61, 0)
+    let name := route_decode(route_slice(pair, 0, equals))
+    let value := route_decode(
+      if equals < Text::len(pair) { route_slice(pair, equals + 1, Text::len(pair)) } else { "" }
+    )
+    match name {
+      None => Err(MalformedQuery)
+      Some(key) => match value {
+        None => Err(MalformedQuery)
+        Some(text) => match route_query_parts(query, end + 1) {
+          Err(error) => Err(error)
+          Ok(rest) => if pair == "" { Ok(rest) } else {
+            Ok(Cons(RouteQueryValue { name: key, value: text }, rest))
+          }
+        }
+      }
+    }
+  }
+}
+
+// A static path must match exactly. Fragments are not part of the route or its query.
+pub fn route_query(
+  target: Text,
+  path: Text
+): Result(List(RouteQueryValue), RouteError) ! {overflow, div} {
+  let fragment := route_find(target, 35, 0)
+  let clean := route_slice(target, 0, fragment)
+  let question := route_find(clean, 63, 0)
+  if route_slice(clean, 0, question) != path { Err(NoRoute) } else {
+    route_query_parts(
+      if question < Text::len(clean) { route_slice(clean, question + 1, Text::len(clean)) } else { "" },
+      0
+    )
+  }
+}
+// One piece of a declared path: literal text, or a whole segment read by a codec.
+pub(open) enum RoutePart {
+  RouteLiteral(Text)
+  RouteCapture(Text)
+}
+pub(open) struct(shared) RouteMatch {
+  segments: List(RouteQueryValue),
+  query: List(RouteQueryValue)
+}
+
+fn route_starts(value: Text, at: u64, prefix: Text): Bool ! {overflow} {
+  route_slice(
+    value,
+    at,
+    at + Text::len(prefix)
+  ) == prefix && at + Text::len(prefix) <= Text::len(value)
+}
+fn route_path_parts(
+  path: Text,
+  at: u64,
+  parts: List(RoutePart)
+): Result(List(RouteQueryValue), RouteError) ! {overflow, div} {
+  match parts {
+    Nil => if at == Text::len(path) { Ok(Nil) } else { Err(NoRoute) }
+    Cons(part, rest) => match part {
+      RouteLiteral(text) => if route_starts(
+        path,
+        at,
+        text
+      ) { route_path_parts(path, at + Text::len(text), rest) } else { Err(NoRoute) }
+      RouteCapture(name) => {
+        let end := route_find(path, 47, at)
+        if end == at { Err(NoRoute) } else {
+          match percent_decode(route_slice(path, at, end)) {
+            None => Err(MalformedQuery)
+            Some(text) => match route_path_parts(path, end, rest) {
+              Err(error) => Err(error)
+              Ok(values) => Ok(Cons(RouteQueryValue { name: name, value: text }, values))
+            }
+          }
+        }
+      }
+    }
+  }
+}
+// The path must match the declared parts. A capture is one whole, non-empty segment,
+// percent-decoded once; `+` stays `+` in a path. Fragments are not part of the route.
+pub fn route_match(
+  target: Text,
+  parts: List(RoutePart)
+): Result(RouteMatch, RouteError) ! {overflow, div} {
+  let fragment := route_find(target, 35, 0)
+  let clean := route_slice(target, 0, fragment)
+  let question := route_find(clean, 63, 0)
+  match route_path_parts(route_slice(clean, 0, question), 0, parts) {
+    Err(error) => Err(error)
+    Ok(segments) => match route_query_parts(
+      if question < Text::len(clean) { route_slice(clean, question + 1, Text::len(clean)) } else { "" },
+      0
+    ) {
+      Err(error) => Err(error)
+      Ok(query) => Ok(RouteMatch { segments: segments, query: query })
+    }
+  }
+}
+// A segment the codec rejects is another path, so it is NoRoute and other routes are tried.
+pub fn route_read_segment<A: Shared>(
+  codec: Codec(A),
+  values: List(RouteQueryValue),
+  name: Text
+): Result(A, RouteError) ! {overflow, div} {
+  match route_parameter(values, name) {
+    None => Err(NoRoute)
+    Some(text) => ⊢ Result(A, RouteError) from match (codec.decode)(text) {
+      None => Err(NoRoute)
+      Some(value) => Ok(value)
+    }
+  }
+}
+// `.` and `..` are escaped so that a browser does not read the segment as a directory step.
+pub fn route_segment_item(value: Text): Text ! {overflow, div} {
+  if value == "." { "%2E" } else if value == ".." { "%2E%2E" } else { percent_encode(value) }
+}
+pub fn route_parameter(values: List(RouteQueryValue), name: Text): Option(Text) ! {div} {
+  match values { Nil => None
+    Cons(item, rest) => if item.name == name { Some(item.value) } else {
+      route_parameter(rest, name)
+    } }
+}
+pub fn route_read<A: Shared>(
+  codec: Codec(A),
+  values: List(RouteQueryValue),
+  name: Text
+): Result(A, RouteError) ! {overflow, div} {
+  match route_parameter(values, name) {
+    None => Err(MissingParameter(name))
+    Some(text) => ⊢ Result(A, RouteError) from match (codec.decode)(text) {
+      None => Err(InvalidParameter(name))
+      Some(value) => Ok(value)
+    }
+  }
+}
+pub fn route_read_or<A: Shared>(
+  codec: Codec(A),
+  values: List(RouteQueryValue),
+  name: Text,
+  fallback: A
+): Result(A, RouteError) ! {overflow, div} {
+  match route_parameter(values, name) {
+    None => Ok(fallback)
+    Some(text) => ⊢ Result(A, RouteError) from match (codec.decode)(text) {
+      None => Ok(fallback)
+      Some(value) => Ok(value)
+    }
+  }
+}
+pub fn route_query_item(name: Text, value: Text): Text ! {overflow, div} {
+  concat(percent_encode(name), concat("=", percent_encode(value)))
+}
+
+pub(open) struct(shared) RouteSpec(R: Shared) {
+  href: (R) -> Text ! {overflow, div},
+  parse: (Text) -> Result(R, RouteError) ! {overflow, div}
+}
+
+// Combine different generated page types into one application's route enum.
+pub(open) struct(shared) RouteChoice(R: Shared) {
+  parse: (Text) -> Result(R, RouteError) ! {overflow, div}
+}
+pub fn route_choice<A: Shared, R: Shared>(spec: RouteSpec(A), inject: (A) -> R): RouteChoice(R) {
+  RouteChoice { parse: (target: Text) => match (spec.parse)(target) {
+      Err(error) => Err(error)
+      Ok(value) => Ok(inject(value))
+    } }
+}
+pub fn choose_route<R: Shared>(
+  choices: List(RouteChoice(R)),
+  target: Text
+): Result(R, RouteError) ! {overflow, div} {
+  match choices {
+    Nil => Err(NoRoute)
+    Cons(choice, rest) => match (choice.parse)(target) {
+      Ok(value) => Ok(value)
+      Err(error) => match error {
+        NoRoute => choose_route(rest, target)
+        MalformedQuery => Err(error)
+        MissingParameter(_) => Err(error)
+        InvalidParameter(_) => Err(error)
+      }
+    }
+  }
+}

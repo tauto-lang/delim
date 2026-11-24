@@ -1,0 +1,20 @@
+*
+!*/
+!.gitignore
+
+!/Tauto.eure
+!/README.md
+!/LICENSE-MIT
+!/LICENSE-APACHE
+
+!/src/*.taut
+
+!/example/*.eure
+!/example/src/*.taut
+
+!/tests/*.eure
+!/tests/src/*.taut
+
+# Generated output and local state.
+target/
+node_modules/

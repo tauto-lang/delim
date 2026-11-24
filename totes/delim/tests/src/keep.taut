@@ -1,0 +1,62 @@
+// Parts kept under `provide`: a handler and an `@if` branch built after the build returned
+// still read the contexts of where they stand.
+import "../../src/signal.taut" { Signal, get, reactive, set, signal }
+import "../../src/tree.taut" {
+  EventData,
+  EventKind,
+  Node,
+  Patch,
+  Tree,
+  fire,
+  handler_nodes,
+  take_patches,
+  tree
+}
+import "../../src/context.taut" { context }
+import "../../../delim-html/src/html-view.taut" { view }
+import "../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind, web_vocab }
+import "../../../delim-html/src/ui.taut" { Delim, provide, with_ui }
+
+struct(shared) Who { name: Text, log: Signal(Text) }
+
+fn panel(open: Signal(Bool)): Node ! {Delim, context(Who)} {
+  view!(```
+    <div>
+      <button on:press=${(d: EventData) => { let w: Who := use_context()
+        set(w.log, concat(w.name, " pressed")) }}>"press"</button>
+      @if $get(open) { <p>${let w: Who := use_context()
+        concat("open for ", w.name)}</p> }
+    </div>
+    ```)
+}
+
+fn texts(ps: List(Patch(HtmlKind, HtmlAttr))): List(Text) {
+  match ps {
+    Nil => Nil
+    Cons(CreateText(n, s), rest) => Cons(s, texts(rest))
+    Cons(p, rest) => texts(rest)
+  }
+}
+
+perform test("kept parts read the contexts of where they stand", () => {
+  let seen := reactive(() => {
+    let t: Tree(HtmlKind, HtmlAttr) := tree()
+    let open := signal(false)
+    let log := signal("")
+    let built := with_ui(t, web_vocab(), () => provide(Who { name: "ada", log: log }, () => panel(open)))
+    let first := take_patches(t)
+    set(open, true)
+    let opened := texts(take_patches(t))
+    match handler_nodes(t, Press) {
+      Cons(n, rest) => fire(t, Node { id: n }, Press, NoData)
+      Nil => #()
+    }
+    #(opened, get(log))
+  })
+  match seen {
+    #(opened, log) => {
+      expect(log == "ada pressed", log)
+      expect(opened == ["open for ada"], "opened")
+    }
+  }
+})

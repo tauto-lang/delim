@@ -1,0 +1,35 @@
+import std::builtin::os { print, stdout }
+import "routes.taut" {
+  default_language,
+  dispatch,
+  failures,
+  field_names,
+  no_parameters,
+  path_choice,
+  path_mismatches,
+  path_segments,
+  primitive_defaults,
+  required_values,
+  round_trip,
+  typed_link,
+  unicode_and_duplicates
+}
+fn check(name: Text, value: Bool): Unit ! {stdout} {
+  print(concat(concat(name, " = "), if value { "\"ok\"\n" } else { "\"FAILED\"\n" }))
+}
+perform main(() => {
+  check("typed route round trip", round_trip())
+  check("schema defaults", default_language())
+  check("missing required values, malformed encoding and unmatched paths", failures())
+  check("primitive codecs and expression defaults", primitive_defaults())
+  check("raw Unicode, plus, fragments and first-value precedence", unicode_and_duplicates())
+  check("the route spec parses and writes the same address", dispatch())
+  check("a static route without parameters", no_parameters())
+  check("required values reject invalid primitive values", required_values())
+  check("typed links escape query delimiters as HTML attributes", typed_link())
+  check("field names cannot shadow decoder temporaries", field_names())
+  check("dynamic path segments round trip", path_segments())
+  check("path segments that do not match are NoRoute", path_mismatches())
+  check("dynamic routes in route_choice", path_choice())
+  #()
+})

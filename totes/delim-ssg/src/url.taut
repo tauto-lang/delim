@@ -1,0 +1,93 @@
+// Percent-encoding of path segments and query values, so that a key or a route parameter
+// arrives as it was written, whatever bytes it has.
+
+fn hex_value(c: u64): Option(u64) ! {overflow} {
+  if c >= 48 && c <= 57 { Some(c - 48) } else if c >= 65 && c <= 70 {
+    Some(c - 55)
+  } else if c >= 97 && c <= 102 {
+    Some(c - 87)
+  } else { None }
+}
+
+fn reverse_bytes(l: List(u8), acc: List(u8)): List(u8) {
+  match l {
+    Nil => acc
+    Cons(b, rest) => reverse_bytes(rest, Cons(b, acc))
+  }
+}
+
+// The bytes of `t` from `i` with each `%XY` read as one byte, newest first in `acc`; `None`
+// for a `%` without two hex digits. With `plus`, as in a form, a `+` is a space.
+fn decoded_bytes(t: Text, i: u64, acc: List(u8), plus: Bool): Option(List(u8)) ! {overflow, div} {
+  match Text::byte(t, i) {
+    None => Some(reverse_bytes(acc, Nil))
+    Some(b) => if U64::of_u8(b) == 37 {
+      match Text::byte(t, i + 1) {
+        None => None
+        Some(h) => match Text::byte(t, i + 2) {
+          None => None
+          Some(l) => match hex_value(U64::of_u8(h)) {
+            None => None
+            Some(hv) => match hex_value(U64::of_u8(l)) {
+              None => None
+              Some(lv) => decoded_bytes(t, i + 3, Cons(U8::of_u64(hv * 16 + lv), acc), plus)
+            }
+          }
+        }
+      }
+    } else if plus && U64::of_u8(b) == 43 {
+      decoded_bytes(t, i + 1, Cons(U8::of_u64(32), acc), plus)
+    } else {
+      decoded_bytes(t, i + 1, Cons(b, acc), plus)
+    }
+  }
+}
+
+// `t` with its percent-escapes read; `None` when they are broken or the bytes are not UTF-8.
+pub fn percent_decode(t: Text): Option(Text) ! {overflow, div} {
+  match decoded_bytes(t, 0, Nil, false) {
+    None => None
+    Some(bs) => Text::of_utf8(bs)
+  }
+}
+
+// A name or value of an `application/x-www-form-urlencoded` body: `+` is a space, then the
+// percent-escapes are read.
+pub fn form_decode(t: Text): Option(Text) ! {overflow, div} {
+  match decoded_bytes(t, 0, Nil, true) {
+    None => None
+    Some(bs) => Text::of_utf8(bs)
+  }
+}
+
+pub fn hex_digit(n: u64): Text ! {overflow} {
+  match Text::slice("0123456789ABCDEF", n, n + 1) {
+    Some(d) => d
+    None => "0"
+  }
+}
+
+// Letters, digits and `-._~` stay; every other byte is written `%XY`.
+fn unreserved(c: u64): Bool {
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45 || c == 46 || c == 95 || c == 126
+}
+
+// Written into one buffer in a loop, so that the time is linear in the length of `t`.
+pub fn percent_encode(t: Text): Text ! {overflow, div} {
+  var b := Buf::new()
+  var i: u64 := 0
+  let n := Text::len(t)
+  while i < n {
+    let c := match Text::byte(t, i) {
+      Some(x) => U64::of_u8(x)
+      None => 0
+    }
+    let piece := if unreserved(c) { match Text::slice(t, i, i + 1) {
+        Some(x) => x
+        None => ""
+      } } else { concat(concat("%", hex_digit(div(c, 16))), hex_digit(mod(c, 16))) }
+    Buf::push(&mut b, &piece)
+    i := i + 1
+  }
+  Text::of(b)
+}

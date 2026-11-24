@@ -1,0 +1,42 @@
+import std::builtin::par { Ref, ref_get, ref_new, ref_set }
+import "../../../src/signal.taut" { batch, get, peek, reactive, set, signal, watch }
+import "../../../src/tree.taut" { EventData, EventKind, Prop, Tree, el, fire, tree }
+import "../../../src/store.taut" { Store, dispatch, just, model, select, store }
+
+perform test("batch preserves nesting and runs watchers once", () => {
+  let batched := reactive(() => {
+    let s := signal(0)
+    let runs: Ref(Nat) := perform ref_new(0)
+    watch(() => { let ^seen := get(s); perform ref_set(runs, perform ref_get(runs) + 1) })
+    batch(() => { set(s, 1); batch(() => set(s, 2)); set(s, 3) })
+    perform ref_get(runs) == 2 && peek(s) == 3
+  })
+  expect(batched, "batch changed behavior")
+})
+perform test("handler traversal preserves registration order and batching", () => {
+  let ordered := reactive(() => {
+    let t: Tree(Text, Text) := tree()
+    let s := signal(0)
+    let runs: Ref(Nat) := perform ref_new(0)
+    watch(() => { let ^seen := get(s); perform ref_set(runs, perform ref_get(runs) + 1) })
+    let node := el(t, "button", [
+      On(Press, (event: EventData) => set(s, 1)),
+      On(Press, (event: EventData) => set(s, peek(s) * 10 + 2))
+    ], Nil)
+    fire(t, node, Press, NoData)
+    let first := peek(s) == 12 && perform ref_get(runs) == 2
+    fire(t, node, Edit, TextData("unused"))
+    first && peek(s) == 12 && perform ref_get(runs) == 2
+  })
+  expect(ordered, "event delivery changed behavior")
+})
+
+perform test("store uses Delim signals with the current prelude", () => {
+  let store_ok := reactive(() => {
+    let s: Store(Nat, Nat, Nat) := store(0, (m: Nat, msg: Nat) => just(m + msg))
+    let slice := select(s, (m: Nat) => m)
+    dispatch(s, 2)
+    model(s) == 2 && get(slice) == 2
+  })
+  expect(store_ok, "store signal resolution")
+})

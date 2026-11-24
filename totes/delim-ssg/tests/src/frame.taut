@@ -1,0 +1,37 @@
+import "../../../delim/src/signal.taut" { rt }
+import "../../../delim/src/common.taut" { Vocab }
+import "../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../../delim/src/tree.taut" { Node, Prop, Tree, el, text }
+import "../../src/site.taut" { Head, Page, document }
+import "../../src/frame.taut" { Frame, framed, nested }
+import "check.taut" { check }
+
+fn body(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  el(t, Tag("p"), Nil, Cons(text(t, "page"), Nil))
+}
+
+fn around(name: Text): Frame {
+  Frame {
+    head: Cons(Meta("frame", name), Nil),
+    wrap: (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr), inner: Node) => el(
+      t,
+      Tag("div"),
+      Cons(Static(Attr("class", name)), Nil),
+      Cons(inner, Nil)
+    )
+  }
+}
+
+fn plain(): Page { Page { title: "T", lang: "", head: Cons(Meta("page", "p"), Nil), view: body } }
+
+fn no_load(key: Text): Result(Text, Text) ! {div} { Err("none") }
+
+perform test("frame", () => {
+  check(
+    "frames nest, the outer one outside, and the page keeps its title",
+    document(
+      framed(nested(around("shell"), around("section")), plain()),
+      no_load
+    ) == Ok("<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>T</title><meta name=\"frame\" content=\"shell\"><meta name=\"frame\" content=\"section\"><meta name=\"page\" content=\"p\"></head><body><div id=\"app\"><div class=\"shell\"><div class=\"section\"><p>page</p></div></div></div></body></html>\n")
+  )
+})

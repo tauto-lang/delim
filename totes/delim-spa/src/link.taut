@@ -1,0 +1,14 @@
+import "../../delim/src/signal.taut" { rt }
+import "../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind }
+import "../../delim/src/tree.taut" { Node, Prop, Tree, el }
+import "route_value.taut" { RouteSpec }
+
+// A link to `value`, at the address its route writes, query included.
+pub fn route_link<R: Shared>(
+  t: Tree(HtmlKind, HtmlAttr),
+  spec: RouteSpec(R),
+  value: R,
+  children: List(Node)
+): Node ! {rt, div} {
+  el(t, Tag("a"), [Static(Attr("href", (spec.href)(value)))], children)
+}

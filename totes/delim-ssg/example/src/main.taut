@@ -1,0 +1,105 @@
+import "../../../delim/src/common.taut" { Vocab }
+import "../../../delim-html/src/markup.taut" { HtmlAttr, HtmlKind, checked_html, escaped_html }
+import "../../../delim/src/tree.taut" { Node, Tree, el, text, text_dyn }
+import "../../../delim/src/signal.taut" { rt }
+import "../../../delim/src/resource.taut" { suspense_in }
+import "../../../delim-html/src/safe.taut" { TrustedHtml }
+import "../../../delim-html/src/html-view.taut" { view }
+import "../../../delim-html/src/html.taut" { escape_text }
+import "../../src/resource.taut" { Res, loading, use_res_in_tree }
+import "../../src/codec.taut" { text_codec }
+import "../../src/route.taut" { Route, route }
+import "../../src/site.taut" { Head, Layout, Page, text_asset }
+import "../../src/app.taut" { App, generate_app }
+import "../../../delim/src/handle.taut" { state }
+
+// An example site. `generate <dir>` writes its pages.
+
+// The routes: each page with the path it is written at. A page with an argument is a function.
+fn home_route(): Route ! {overflow, div} {
+  route(Nil, Page { title: "Home", lang: "en", head: head(), view: home })
+}
+fn about_route(): Route ! {overflow, div} {
+  route(["about"], Page { title: "About", lang: "en", head: head(), view: about })
+}
+fn post_route(id: Nat): Route ! {overflow, div} {
+  route(
+    ["posts", Text::of_nat(id)],
+    Page { title: "Post", lang: "en", head: head(), view: post(id) }
+  )
+}
+
+// The resource the About page reads while it is written.
+fn motto(): Res(Text) { Res { key: "motto", value: text_codec() } }
+
+// HTML made by a renderer that escapes what it is given, written into the page as it is.
+fn intro(): TrustedHtml ! {overflow, div} {
+  let html := concat(
+    concat("<p><em>", escape_text("Signals & effects")),
+    "</em>, rendered ahead of time.</p>"
+  )
+  // Checked as it is written into the page; were it refused, its text would show instead.
+  match checked_html(html) {
+    Some(h) => h
+    None => escaped_html(html)
+  }
+}
+
+fn home(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  view!(```
+    $t <main>
+      <h1>"Delim"</h1>
+      $trusted(t, intro())
+      $link(t, about_route(), Cons(text(t, "About"), Nil))
+    </main>
+    ```)
+}
+
+fn about(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  suspense_in(t, () => delim::src::tree::text(t, "…"), () => {
+    let r := use_res_in_tree(t, motto())
+    view!(```
+      $t <p>
+        $text_dyn(t, () => match state(r) {
+        Pending => ""
+        Ready(m) => m
+        Failed(why) => "取得できませんでした。"
+        Cancelled => "読み込みを中止しました。"
+      })
+      </p>
+      ```)
+  })
+}
+
+fn post(id: Nat): (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) -> Node ! {rt, div} {
+  (t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)) => el(
+    t,
+    Tag("p"),
+    Nil,
+    Cons(delim::src::tree::text(t, concat("Post ", Text::of_nat(id))), Nil)
+  )
+}
+
+fn head(): List(Head) {
+  Cons(Stylesheet("/style.css"), Cons(Meta("description", "An example Delim site"), Nil))
+}
+
+fn missing(t: Tree(HtmlKind, HtmlAttr), v: Vocab(HtmlKind, HtmlAttr)): Node ! {rt, div} {
+  view!(```
+    $t <main><h1>"Not found"</h1> $link(t, home_route(), Cons(text(t, "Home"), Nil))</main>
+    ```)
+}
+
+fn motto_now(): Result(Text, Text) ! {div} { Ok("Signals & effects.") }
+
+perform main(() => {
+  generate_app(App {
+    routes: [home_route(), about_route(), post_route(1)],
+    resources: Cons(loading(motto(), motto_now), Nil),
+    assets: Cons(text_asset("/style.css", "main { font-family: sans-serif; }\n"), Nil),
+    // `about/index.html` and `posts/1/index.html`, which static hosts serve at `/about/` and `/posts/1/`.
+    layout: Directories,
+    // Written as `404.html`, which static hosts answer a path with no file with.
+    not_found: Some(Page { title: "Not found", lang: "en", head: head(), view: missing })
+  })
+})
